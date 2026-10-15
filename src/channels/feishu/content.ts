@@ -244,9 +244,12 @@ export function renderTextMentions(text: string, mentions: FeishuMention[], botO
   return rendered;
 }
 
+/** A mention of the bot always reads as this fixed token, so it never collides with a person's name. */
+export const BOT_MENTION = "@bot";
+
 function mentionLabel(mention: FeishuMention, botOpenId?: string): string {
   if (mention.key === "@_all") return "@所有人";
-  if (botOpenId && mentionOpenId(mention) === botOpenId) return "@我";
+  if (botOpenId && mentionOpenId(mention) === botOpenId) return BOT_MENTION;
   return `@${mention.name || fallbackName(mentionOpenId(mention) || mention.key || "user")}`;
 }
 
@@ -313,7 +316,7 @@ function renderPostNode(
       return href ? `[${label}](${href})` : label;
     }
     case "at":
-      return renderAtTag(node, ctx.botOpenId);
+      return renderAtTag(node, ctx);
     case "code_block": {
       const lang = typeof node.language === "string" ? node.language : "";
       return `\n\`\`\`${lang}\n${String(node.text ?? "")}\n\`\`\`\n`;
@@ -339,17 +342,19 @@ function renderPostNode(
 function renderMd(text: string, ctx: NormalizeContext): string {
   return text.replace(/<at\s+user_id="([^"]+)"[^>]*>\s*<\/at>/g, (_all, userId: string) => {
     if (userId === "all") return "@所有人";
-    if (ctx.botOpenId && userId === ctx.botOpenId) return "@我";
     const mention = (ctx.mentions ?? []).find((item) => mentionOpenId(item) === userId);
+    if (ctx.botOpenId && userId === ctx.botOpenId) return BOT_MENTION;
     return `@${mention?.name || fallbackName(userId)}`;
   });
 }
 
-function renderAtTag(node: Record<string, unknown>, botOpenId?: string): string {
+function renderAtTag(node: Record<string, unknown>, ctx: NormalizeContext): string {
   const userId = String(node.user_id ?? "");
   if (userId === "all" || node.user_name === "所有人") return "@所有人";
-  if (botOpenId && userId === botOpenId) return "@我";
-  const name = typeof node.user_name === "string" ? node.user_name : fallbackName(userId || "user");
+  const mention = (ctx.mentions ?? []).find((item) => mentionOpenId(item) === userId);
+  const tagName = typeof node.user_name === "string" && node.user_name ? node.user_name : undefined;
+  if (ctx.botOpenId && userId === ctx.botOpenId) return BOT_MENTION;
+  const name = tagName ?? mention?.name ?? fallbackName(userId || "user");
   return `@${name}`;
 }
 

@@ -53,7 +53,7 @@ describe("feishu message normalization", () => {
         ],
       }),
     );
-    expect(text.text).toBe("hi @我 @所有人");
+    expect(text.text).toBe("hi @bot @所有人");
     expect(text.mentionsSelf).toBe(true);
     expect(text.mentionsOthers).toBe(true);
     expect(text.names).toEqual([{ stableId: "feishu:ou_bot", ref: "ou_bot", name: "Bot", aliases: ["feishu-union:on_bot"] }]);
@@ -65,7 +65,8 @@ describe("feishu message normalization", () => {
       }),
     );
     expect(post.text).toContain("**标题**");
-    expect(post.text).toContain("@我");
+    expect(post.text).not.toContain("@我");
+    expect(post.text).toContain("@bot");
     expect(post.mentionsSelf).toBe(true);
 
     const image = await normalize(raw({ msg_type: "image", content: { image_key: "img_1" } }));
@@ -205,7 +206,7 @@ describe("feishu adapter", () => {
     expect(messages).toHaveLength(1);
     if (messages[0].type !== "message") throw new Error("expected message");
     expect(messages[0].mentionsSelf).toBe(true);
-    expect(messages[0].text).toContain("@我");
+    expect(messages[0].text).toContain("@bot");
     expect(messages[0].actor.stableId).toBe("feishu:ou_u");
     expect(messages[0].actor.aliases).toEqual(["feishu-union:on_u"]);
     expect(messages[0].scope).toEqual({ channel: "feishu", kind: "group", id: "oc_1" });
@@ -390,13 +391,41 @@ describe("feishu adapter", () => {
     expect(await loadBotProfile(http)).toEqual({ openId: "ou_old", appName: "旧名" });
   });
 
-  it("sends markdown as post and tables as a json 2.0 card", () => {
+  it("renders the bot mention as the fixed @bot token and others with their event names", async () => {
+    const mentions = [
+      { key: "@_user_1", id: { open_id: "ou_bot" }, name: "SuperGrok" },
+      { key: "@_user_2", id: { open_id: "ou_amy" }, name: "Amy" },
+    ];
+    const text = await normalize(raw({ msg_type: "text", content: { text: "@_user_1 我叫什么 @_user_2" }, mentions }));
+    expect(text.text).toBe("@bot 我叫什么 @Amy");
+    expect(text.mentionsSelf).toBe(true);
+    expect(text.mentionsOthers).toBe(true);
+    const fallback = await normalize(raw({ msg_type: "text", content: { text: "@_user_1 我叫什么" }, mentions }));
+    expect(fallback.text).toBe("@bot 我叫什么");
+    const post = await normalize(
+      raw({
+        msg_type: "post",
+        content: { zh_cn: { content: [[{ tag: "at", user_id: "ou_bot", user_name: "SuperGrok" }, { tag: "text", text: " hi " }, { tag: "at", user_id: "ou_amy" }]] } },
+        mentions,
+      }),
+      { mentions },
+    );
+    expect(post.text).toContain("@bot");
+    expect(post.text).not.toContain("SuperGrok");
+    expect(post.text).not.toContain("小灵");
+    expect(post.text).toContain("@Amy");
+    expect(post.text).not.toContain("@我");
+    expect(post.mentionsSelf).toBe(true);
+  });
+
+  it("sends markdown and tables as post md, short plain replies as text", () => {
     const post = feishuMessageBody("**bold**\n- item\n[docs](https://example.com)");
     expect(post.msg_type).toBe("post");
     expect(JSON.parse(post.content)).toEqual({ zh_cn: { content: [[{ tag: "md", text: "**bold**\n- item\n[docs](https://example.com)" }]] } });
-    const card = feishuMessageBody("| a | b |\n| --- | --- |\n| 1 | 2 |");
-    expect(card.msg_type).toBe("interactive");
-    expect(JSON.parse(card.content)).toMatchObject({ schema: "2.0", body: { elements: [{ tag: "markdown" }] } });
+    const table = "| a | b |\n| --- | --- |\n| 1 | 2 |";
+    const tablePost = feishuMessageBody(table);
+    expect(tablePost.msg_type).toBe("post");
+    expect(JSON.parse(tablePost.content)).toEqual({ zh_cn: { content: [[{ tag: "md", text: table }]] } });
     expect(feishuMessageBody("好的").msg_type).toBe("text");
   });
 

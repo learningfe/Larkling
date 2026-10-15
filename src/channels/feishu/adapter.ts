@@ -528,31 +528,12 @@ function textOrUndefined(value: unknown): string | undefined {
 }
 
 /**
- * Short plain replies stay text. Markdown tables use a JSON 2.0 card, which
- * renders tables. Other markdown uses a post `md` element.
+ * Short plain replies stay text. Everything else, including Markdown tables,
+ * goes out as a post with one `md` element.
  */
-export function feishuMessageBody(text: string): { msg_type: "text" | "post" | "interactive"; content: string } {
-  if (hasMarkdownTable(text)) {
-    return {
-      msg_type: "interactive",
-      content: JSON.stringify({
-        schema: "2.0",
-        config: { update_multi: true },
-        body: { elements: [{ tag: "markdown", content: text }] },
-      }),
-    };
-  }
+export function feishuMessageBody(text: string): { msg_type: "text" | "post"; content: string } {
   if (isPlainShort(text)) return { msg_type: "text", content: JSON.stringify({ text }) };
   return { msg_type: "post", content: JSON.stringify({ zh_cn: { content: [[{ tag: "md", text }]] } }) };
-}
-
-function hasMarkdownTable(text: string): boolean {
-  const lines = text.split(/\r?\n/);
-  const separator = /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/;
-  for (let index = 0; index < lines.length - 1; index++) {
-    if (lines[index].includes("|") && separator.test(lines[index + 1])) return true;
-  }
-  return false;
 }
 
 function isPlainShort(text: string): boolean {
