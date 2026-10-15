@@ -1,7 +1,9 @@
+import { writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { CodexRuntime, SEED_PREFACE, mapSandbox, toCodexInput } from "../src/runtimes/codex/adapter.js";
 import { MemoryCodexTransport, StdioCodexTransport } from "../src/runtimes/codex/transport.js";
-import type { RuntimeEvent, SessionSpec, TurnInput } from "../src/protocol/types.js";
+import { emptyState, type RuntimeEvent, type SessionSpec, type TurnInput } from "../src/protocol/types.js";
 import { createHost } from "../src/core/host.js";
 import { MemoryChannel } from "../src/channels/memory.js";
 import { ManualClock } from "../src/core/clock.js";
@@ -23,7 +25,7 @@ function input(text = "hello"): TurnInput {
 }
 
 /** Reply to app-server requests the adapter has already written. */
-function drive(transport: MemoryCodexTransport, options?: { completeTurns?: boolean }): () => void {
+function drive(transport: MemoryCodexTransport, options?: { completeTurns?: boolean; echoResumeId?: boolean }): () => void {
   let cursor = 0;
   let threads = 0;
   const timer = setInterval(() => {
@@ -33,7 +35,8 @@ function drive(transport: MemoryCodexTransport, options?: { completeTurns?: bool
       if (message.method === "initialize") transport.push({ id: message.id, result: { userAgent: "test" } });
       else if (message.method === "thread/start" || message.method === "thread/resume") {
         threads += 1;
-        transport.push({ id: message.id, result: { thread: { id: `th_${threads}` } } });
+        const requested = options?.echoResumeId && message.method === "thread/resume" ? String(message.params?.threadId ?? "") : "";
+        transport.push({ id: message.id, result: { thread: { id: requested || `th_${threads}` } } });
       } else if (message.method === "turn/start" || message.method === "turn/steer") {
         transport.push({ id: message.id, result: { turn: { id: `ct_${message.id}` } } });
         if (options?.completeTurns && message.method === "turn/start") {
@@ -252,6 +255,91 @@ describe("codex app-server adapter", () => {
       expect(later).not.toContain(SEED_PREFACE);
       expect(later).toContain("third");
     } finally {
+      stopDrive();
+      await host.stop();
+    }
+  });
+
+  it("resumes a restarted idle thread when tick runs between resume and turn start", async () => {
+    const dir = await tempDir();
+    const config = await testConfig(dir, (draft) => {
+      draft.runtimes.codex.idleReleaseMs = 1_000;
+    });
+    const clock = new ManualClock(Date.parse("2026-03-15T02:00:00.000Z"));
+    const stale = new Date(clock.now() - 60 * 60_000).toISOString();
+    const sessionId = "memory:dm:ou_owner";
+    const state = emptyState();
+    state.sessions[sessionId] = {
+      sessionId,
+      kind: "conversation",
+      scope: { channel: "memory", kind: "dm", id: "ou_owner" },
+      runtimeName: "codex",
+      runtimeRef: "t1",
+      lastSeq: 0,
+      phase: "idle",
+      queue: [],
+      pendingApprovalIds: [],
+      idleSince: stale,
+      token: "tok",
+      imContainer: "ou_owner",
+      createdAt: stale,
+      updatedAt: stale,
+      live: false,
+    };
+    state.tokens.tok = { token: "tok", sessionId, role: "session" };
+    await writeFile(join(dir, "state.json"), JSON.stringify(state));
+
+    const channel = new MemoryChannel(true);
+    let releaseHistory: () => void = () => undefined;
+    const historyGate = new Promise<void>((resolve) => {
+      releaseHistory = resolve;
+    });
+    let historyEntered = false;
+    const originalHistory = channel.history.bind(channel);
+    channel.history = async (query) => {
+      historyEntered = true;
+      await historyGate;
+      return originalHistory(query);
+    };
+    const transport = new MemoryCodexTransport();
+    const stopDrive = drive(transport, { completeTurns: true, echoResumeId: true });
+    const runtime = new CodexRuntime({ transport });
+    const host = await createHost({
+      config,
+      channel,
+      runtimes: new Map([["codex", runtime]]),
+      clock,
+      logger: new Logger(undefined, "error"),
+      bot: { ref: "ou_bot", stableId: "memory:bot", name: "Larkling" },
+      timers: false,
+    });
+    await host.start();
+    try {
+      expect(host.snapshot().sessions[sessionId]).toMatchObject({ live: false, runtimeRef: "t1", idleSince: stale });
+      channel.push(message({ text: "after restart", messageId: "m-restart" }));
+      await waitFor(() => historyEntered, "history after resume");
+      const resumed = host.snapshot().sessions[sessionId];
+      expect(resumed?.live).toBe(true);
+      expect(resumed?.phase).toBe("idle");
+      expect(resumed?.idleSince).toBe(new Date(clock.now()).toISOString());
+
+      const ticking = host.tick();
+      releaseHistory();
+      await ticking;
+      await host.settle();
+
+      const started = transport.sent.filter((item) => (item as { method?: string }).method === "turn/start") as {
+        params: { threadId?: string };
+      }[];
+      expect(started).toHaveLength(1);
+      expect(started[0]?.params.threadId).toBe("t1");
+      expect(transport.sent.some((item) => (item as { method?: string }).method === "thread/unsubscribe")).toBe(false);
+      const texts = channel.sent.map((item) => (item.action.type === "text" ? item.action.text : ""));
+      expect(texts.some((text) => text.includes("这一轮没有完成") || text.includes("unknown codex thread"))).toBe(false);
+      expect(texts).toContain("ok");
+      expect(host.snapshot().sessions[sessionId]?.live).toBe(true);
+    } finally {
+      releaseHistory();
       stopDrive();
       await host.stop();
     }

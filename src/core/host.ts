@@ -888,11 +888,23 @@ export class Host {
 
   private async releaseIdle(now: number): Promise<void> {
     for (const session of Object.values(this.stateStore.get().sessions)) {
-      if (session.kind !== "conversation" || !session.live || session.phase !== "idle" || session.queue.length) continue;
-      const limits = runtimeLimits(this.config, session.runtimeName);
-      const idleSince = Date.parse(session.idleSince ?? session.updatedAt);
-      if (now - idleSince >= limits.idleReleaseMs) await this.releaseSession(session.sessionId);
+      if (!this.idleReleaseDue(session, now)) continue;
+      // The session lock is held across resume and turn/start. Re-check inside it so a
+      // tick cannot unsubscribe a thread that is being brought back.
+      await this.lock.run(session.sessionId, async () => {
+        const current = this.stateStore.get().sessions[session.sessionId];
+        if (!current?.live || current.phase !== "idle" || current.queue.length) return;
+        if (!this.idleReleaseDue(current, now)) return;
+        await this.releaseSession(current.sessionId);
+      });
     }
+  }
+
+  private idleReleaseDue(session: SessionRecord, now: number): boolean {
+    if (session.kind !== "conversation" || !session.live || session.phase !== "idle" || session.queue.length) return false;
+    const limits = runtimeLimits(this.config, session.runtimeName);
+    const idleSince = Date.parse(session.idleSince ?? session.updatedAt);
+    return now - idleSince >= limits.idleReleaseMs;
   }
 
   private async scanHeartbeat(now: number): Promise<void> {
@@ -1052,13 +1064,15 @@ export class Host {
         profile,
         instructions,
       });
+      const now = this.iso();
       await this.stateStore.update((draft) => {
         const current = draft.sessions[session.sessionId];
         current.runtimeRef = ref;
         current.instructionsHash = hash;
         current.runtimeName = session.runtimeName;
         current.live = true;
-        current.lastUsedAt = this.iso();
+        current.idleSince = now;
+        current.lastUsedAt = now;
       });
     };
     if (session.runtimeRef && session.instructionsHash && session.instructionsHash !== hash) {
@@ -1086,12 +1100,14 @@ export class Host {
           profile,
           instructions,
         });
+        const now = this.iso();
         await this.stateStore.update((draft) => {
           const current = draft.sessions[session.sessionId];
           current.runtimeRef = ref;
           current.instructionsHash = hash;
           current.live = true;
-          current.lastUsedAt = this.iso();
+          current.idleSince = now;
+          current.lastUsedAt = now;
         });
         return;
       } catch {
