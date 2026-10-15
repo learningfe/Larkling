@@ -47,6 +47,10 @@ agents:
     model: gpt-6.1-sol
     # fast 为 true 时这一侧的回合走更快的服务档位，默认 false。轻量回合沿用同一个开关。
     fast: false
+    # network 为 true 时沙箱里的命令可以访问网络，默认 false。轻量回合不打开网络。
+    network: false
+    # 不写 cwd 时，前台工作目录是 ~/.larkling/state/front。
+    # cwd: ~/work
     light: { model: gpt-6-luna }
     sandbox: read-only
     instructions: 简洁、直接，只说你能核对的事实。
@@ -54,6 +58,7 @@ agents:
     runtime: codex
     model: gpt-6.1-sol
     fast: false
+    network: false
     effort: high
     sandbox: workspace-write
     approvalPolicy: on-request

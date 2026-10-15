@@ -17,7 +17,7 @@ src/cli/          larkling 命令
 
 配置默认读 `LARKLING_CONFIG`，否则是 `~/.larkling/config.yaml`。状态目录默认 `~/.larkling/state`，可用 `LARKLING_STATE_DIR` 覆盖。飞书密钥用 `LARKLING_APP_SECRET`（配置里写 `env:LARKLING_APP_SECRET`）。任务 API 只监听 `127.0.0.1`，地址写在状态目录的 `api.url`，所有者令牌写在 `owner.token`（权限 0600）。示例见 `examples/config.yaml`。
 
-`owner` 写成 `feishu:` 加上你的 `open_id`（`ou_` 开头）。`union_id` 只作为附加身份保存，不是主键。`persona.name` 不写时，启动后用飞书应用名称（`/open-apis/bot/v3/info` 的 `app_name`）。群和话题的近期窗口除了条数和 token，还按 `im.window.maxAge` 丢掉更早的消息，默认 24 小时。机器人已经回复过的话题里，之后没 @ 的消息会走相关性判断；某个 scope 在 `respondTo.scopes` 里写了规则时，以配置为准。要停掉后台任务，直接用自然语言说，前台会取消对应任务；对得上不止一个时，会先列出来问你。`agents.front` 和 `agents.back` 都可以写 `fast: true`（默认 `false`）。打开后这一侧的回合走更快的服务档位；检查、相关性判断和压缩用的轻量配置也沿用同一个开关。
+`owner` 写成 `feishu:` 加上你的 `open_id`（`ou_` 开头）。`union_id` 只作为附加身份保存，不是主键。`persona.name` 不写时，启动后用飞书应用名称（`/open-apis/bot/v3/info` 的 `app_name`）。群和话题的近期窗口除了条数和 token，还按 `im.window.maxAge` 丢掉更早的消息，默认 24 小时。机器人已经回复过的话题里，之后没 @ 的消息会走相关性判断；某个 scope 在 `respondTo.scopes` 里写了规则时，以配置为准。要停掉后台任务，直接用自然语言说，前台会取消对应任务；对得上不止一个时，会先列出来问你。`agents.front` 和 `agents.back` 都可以写 `fast: true`（默认 `false`）。打开后这一侧的回合走更快的服务档位；检查、相关性判断和压缩用的轻量配置也沿用同一个开关。`network` 默认 `false`。设为 `true` 时，这一侧沙箱里的命令可以访问网络；轻量回合不打开网络。前台工作目录默认是状态目录下的 `front`（也就是 `~/.larkling/state/front`），可以用 `agents.front.cwd` 改掉。群和话题里提到机器人时，正文固定写成 `@bot`，不用飞书上的显示名，免得和别人的名字撞上；其他人的 @ 仍用他们自己的名字。
 
 ## 命令
 
@@ -69,7 +69,7 @@ npm test
    ```
 
    本机需要有 `codex` 命令，并且支持 `codex app-server`。PATH 上较旧的 `codex` 可能不支持配置里的新模型，把 `runtimes.codex.command` 指到更新的二进制。语音消息还需要 `ffmpeg`。启动日志里如果出现 `bot.open_id_unresolved`，群里的 @ 会被忽略，先核对应用凭证和 `/bot/v3/info`。
-7. 在飞书里私聊这个机器人，发一句普通文字，确认有回复。再在已把机器人拉进去的群里 @ 它。带表格的回复会发成 JSON 2.0 卡片里的 markdown，其余 Markdown 用富文本 post。需要批准的操作会在所有者私聊里发一张一次性卡片。要停掉正在跑的后台任务，直接说停哪一件。
+7. 在飞书里私聊这个机器人，发一句普通文字，确认有回复。再在已把机器人拉进去的群里 @ 它。很短的纯文本用 `text`。其余回复，包括 Markdown 表格，用富文本 post 的 `md`（post 能渲染表格）。对话回复不发 interactive 卡片。需要批准的操作会在所有者私聊里发一张一次性卡片。群里 @ 机器人时，模型看到的是固定的 `@bot`。要停掉正在跑的后台任务，直接说停哪一件。
 
 真机上仍要核对的地方：`@_all` 的事件形态、语音文件的容器格式、语音识别接口的实际返回字段和租户 QPS、卡片和富文本在客户端里的渲染，以及本机 `codex app-server` 的字段名是否与当前适配器一致。
 
