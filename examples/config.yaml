@@ -1,0 +1,53 @@
+# 复制到 ~/.larkling/config.yaml 后按自己的应用改。
+# appSecret 只能写 env:变量名，明文会被拒绝。
+# 以 ./ ../ / ~ 开头的 instructions、soul、local 会按文件读取，文件必须存在。
+
+stateDir: ~/.larkling/state
+timezone: Asia/Shanghai
+limits: { maxConcurrentTasks: 3, maxConcurrentChecks: 1, maxConcurrentJudges: 2 }
+runtimes:
+  codex: { command: codex, args: [], idleRelease: 15m, maxLiveSessions: 8 }
+sessions: { seedMaxTokens: 16000, compactAfterTokens: 64000 }
+
+channel:
+  feishu:
+    appId: cli_xxx
+    appSecret: env:LARKLING_APP_SECRET
+    readGroupMessages: false
+    rateLimit: { perSecond: 20 }
+    speechRatePerSecond: 20
+    domain: https://open.feishu.cn
+
+owner: feishu:on_owner
+trust:
+  trusted: []
+  allowed: []
+  groups: []
+
+im:
+  window: { group: 20, topic: 20, maxTokens: 4000 }
+  respondTo: { default: mention, scopes: {} }
+  gate: { debounce: 5s, judgeContext: 10 }
+
+persona:
+  duty: ""
+
+session: { turnIdleTimeout: 15m, botChainLimit: 3 }
+agents:
+  front:
+    runtime: codex
+    model: gpt-5.4-mini
+    light: { model: gpt-5.4-nano }
+    sandbox: read-only
+    instructions: 简洁、直接，只说你能核对的事实。
+  back:
+    runtime: codex
+    model: gpt-5.4
+    effort: high
+    sandbox: workspace-write
+    approvalPolicy: on-request
+    instructions: 按任务正文推进，做完就停，不要自己扩大范围。
+tasks:
+  enabled: true
+  taskIdleTimeout: 60m
+  heartbeat: { enabled: true, scanInterval: 30s, interval: 30m }
