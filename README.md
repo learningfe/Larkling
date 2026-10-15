@@ -49,7 +49,7 @@ npm test
 自动化测试替换了飞书长连接和开放平台。下面这套是第一次接到真机器人时的手工检查。
 
 1. 在飞书开放平台创建一个企业自建应用，打开机器人能力。
-2. 开通权限：`im:message`、`im:message.group_msg`（敏感权限，需要管理员审批）、`im:chat:readonly`、`speech_to_text:speech`。要在上下文里显示真实姓名，再加 `contact:user.base:readonly`（`GET /open-apis/contact/v3/users/:user_id` 的姓名字段；人还得在应用的通讯录权限范围内）。通讯录查不到时，会改查群成员列表 `GET /open-apis/im/v1/chats/:chat_id/members`，姓名在 `items[].name`。`im:chat:readonly` 已经覆盖这个接口；也可以改开更窄的 `im:chat.members:read`。没有群消息权限时，把配置里的 `readGroupMessages` 留成 `false`。
+2. 开通权限：`im:message`、`im:message.group_msg`（敏感权限，需要管理员审批）、`im:chat:readonly`、`speech_to_text:speech`。群和话题里的显示名来自 `GET /open-apis/im/v1/chats/:chat_id/members` 的 `items[].name`。`im:chat:readonly` 已经覆盖这个接口；也可以改开更窄的 `im:chat.members:read`。不查通讯录。私聊里如果消息本身没有名字，就保持为空。没有群消息权限时，把配置里的 `readGroupMessages` 留成 `false`。
 3. 事件订阅使用长连接，订阅 `im.message.receive_v1`、`im.message.recalled_v1`、`im.message.reaction.created_v1`、`im.message.reaction.deleted_v1`、`card.action.trigger`。不要订阅消息编辑事件，这一版会直接丢掉。
 4. 安装依赖并编译。长连接 SDK `@larksuiteoapi/node-sdk` 已经在依赖里，`npm install` 就够，不用再单独装：
 

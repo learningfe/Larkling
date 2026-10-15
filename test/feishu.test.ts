@@ -417,12 +417,18 @@ describe("feishu adapter", () => {
     expect(JSON.parse(body.content).zh_cn.content[0][0].tag).toBe("md");
   });
 
-  it("resolves sender names from contacts, then chat members, and uses the bot name", async () => {
+  it("resolves group sender names from chat members and leaves DM names unset", async () => {
     const http = new FakeHttp();
+    const memberCalls: string[] = [];
     http.handler = (input) => {
-      if (input.path.includes("/contact/v3/users/ou_known")) return { status: 200, json: { code: 0, data: { user: { name: "陈睿" } } } };
-      if (input.path.includes("/contact/v3/users/ou_member")) return { status: 403, json: { code: 99991672, msg: "no permission" } };
-      if (input.path.includes("/members")) return { status: 200, json: { code: 0, data: { items: [{ member_id: "ou_member", name: "群里的人" }] } } };
+      expect(input.path.includes("/contact/")).toBe(false);
+      if (input.path.includes("/members")) {
+        memberCalls.push(input.path);
+        return {
+          status: 200,
+          json: { code: 0, data: { items: [{ member_id: "ou_known", name: "陈睿" }, { member_id: "ou_member", name: "群里的人" }] } },
+        };
+      }
       return { status: 200, json: { code: 0, data: {} } };
     };
     const dir = await mkdtemp(join(tmpdir(), "larkling-feishu-"));
@@ -440,12 +446,20 @@ describe("feishu adapter", () => {
     const events = await collect(bot, async () => {
       await bot.ingest(receive("ou_known", "on_known", "om_known"));
       await bot.ingest(receive("ou_member", "on_member", "om_member"));
+      await bot.ingest(receive("ou_known", "on_known", "om_known_again"));
       await bot.ingest(receive("ou_bot", "on_bot", "om_self", "app"));
+      await bot.ingest(receive("ou_dm", "on_dm", "om_dm", "user", "p2p"));
+      await bot.ingest(receive("ou_ghost", "on_ghost", "om_ghost"));
     });
     const messages = events.filter((event) => event.type === "message");
-    expect(messages.map((event) => (event.type === "message" ? event.actor.name : ""))).toEqual(["陈睿", "群里的人", "小灵"]);
-    expect(http.calls.some((call) => call.path.includes("/contact/v3/users/ou_bot"))).toBe(false);
-    expect(warnings.some((item) => item.openId === "ou_member")).toBe(false);
+    expect(messages.map((event) => (event.type === "message" ? event.actor.name : ""))).toEqual(["陈睿", "群里的人", "陈睿", "小灵", "", ""]);
+    expect(memberCalls).toEqual([
+      "/open-apis/im/v1/chats/oc_1/members",
+      "/open-apis/im/v1/chats/oc_1/members",
+      "/open-apis/im/v1/chats/oc_1/members",
+    ]);
+    expect(http.calls.some((call) => call.path.includes("/contact/"))).toBe(false);
+    expect(warnings).toEqual([{ openId: "ou_ghost", detail: "no display name" }]);
   });
 
   it("stops paging a thread once a page is older than the window", async () => {
@@ -474,15 +488,15 @@ describe("feishu adapter", () => {
   });
 });
 
-function receive(openId: string, unionId: string, messageId: string, senderType = "user") {
+function receive(openId: string, unionId: string, messageId: string, senderType = "user", chatType = "group") {
   return {
     header: { event_id: messageId, event_type: "im.message.receive_v1" },
     event: {
       sender: { sender_type: senderType, sender_id: { open_id: openId, union_id: unionId } },
       message: {
         message_id: messageId,
-        chat_id: "oc_1",
-        chat_type: "group",
+        chat_id: chatType === "p2p" ? "oc_dm" : "oc_1",
+        chat_type: chatType,
         message_type: "text",
         content: JSON.stringify({ text: "hello" }),
         create_time: "1710000000000",

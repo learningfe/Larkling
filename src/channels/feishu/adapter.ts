@@ -159,7 +159,8 @@ export class FeishuChannel implements ChannelAdapter {
       const normalized = await this.normalize(item, inWindow);
       const name = await this.displayNameFor(normalized.record.actor.ref, {
         mentionName: normalized.senderName,
-        chatId: String(item.chat_id ?? ""),
+        chatId: item.chat_type === "p2p" ? undefined : String(item.chat_id ?? ""),
+        dm: item.chat_type === "p2p",
       });
       if (name) normalized.record.actor.name = name;
       records.push(normalized.record);
@@ -269,9 +270,11 @@ export class FeishuChannel implements ChannelAdapter {
     const actor = actorFromIds(senderId, String(sender?.sender_type ?? "user"), "");
     const scope = scopeFrom(message);
     const normalized = await this.normalize(message, new Set());
+    const dm = scope.kind === "dm";
     const resolvedName = await this.displayNameFor(actor.ref, {
       mentionName: normalized.senderName,
-      chatId: String(message.chat_id ?? scope.parentId ?? scope.id),
+      chatId: dm ? undefined : String(message.chat_id || scope.parentId || ""),
+      dm,
     });
     if (resolvedName) actor.name = resolvedName;
     const names = [...normalized.names];
@@ -327,7 +330,8 @@ export class FeishuChannel implements ChannelAdapter {
           const id = item.id;
           return (typeof id === "string" ? id : id?.open_id) === openId;
         });
-        return this.displayNameFor(openId, { mentionName: mention?.name, chatId: String(message.chat_id ?? "") });
+        const dm = message.chat_type === "p2p";
+        return this.displayNameFor(openId, { mentionName: mention?.name, chatId: dm ? undefined : String(message.chat_id ?? ""), dm });
       },
     });
     const senderName = mentions.find((item) => mentionOpen(item) === (message.sender?.sender_id?.open_id || message.sender?.id))?.name ?? "";
@@ -370,10 +374,11 @@ export class FeishuChannel implements ChannelAdapter {
   }
 
   /**
-   * Display name for an open_id. Mention text wins, then the contact user
-   * API, then chat members. A miss is logged once and does not fail the message.
+   * Display name for an open_id. Mention text and the bot's own app name win.
+   * Otherwise a group or topic looks up `im/v1/chats/{chat_id}/members`.
+   * DMs are not looked up; a miss stays unnamed and is logged once.
    */
-  private async displayNameFor(openId: string, hints: { mentionName?: string; chatId?: string }): Promise<string> {
+  private async displayNameFor(openId: string, hints: { mentionName?: string; chatId?: string; dm?: boolean }): Promise<string> {
     if (!openId || openId === "all") return "";
     const cached = this.names.get(openId);
     if (cached) return cached;
@@ -385,41 +390,19 @@ export class FeishuChannel implements ChannelAdapter {
       this.names.set(openId, hints.mentionName);
       return hints.mentionName;
     }
+    if (hints.dm || !hints.chatId) return "";
     if (this.nameMisses.has(openId)) return "";
-    const contact = await this.lookupContact(openId);
-    if (contact.name) {
-      this.names.set(openId, contact.name);
-      return contact.name;
-    }
-    const member = hints.chatId ? await this.lookupMember(hints.chatId, openId) : undefined;
-    if (member) {
-      this.names.set(openId, member);
-      return member;
+    const member = await this.lookupMember(hints.chatId, openId);
+    if (member.name) {
+      this.names.set(openId, member.name);
+      return member.name;
     }
     this.nameMisses.add(openId);
-    this.options.log?.warn("name.lookup_failed", { openId, detail: contact.error || "no display name" });
+    this.options.log?.warn("name.lookup_failed", { openId, detail: member.error || "no display name" });
     return "";
   }
 
-  private async lookupContact(openId: string): Promise<{ name?: string; error?: string }> {
-    try {
-      await this.limiter.take();
-      const response = await this.options.http.request({
-        method: "GET",
-        path: `/open-apis/contact/v3/users/${encodeURIComponent(openId)}`,
-        query: { user_id_type: "open_id" },
-      });
-      const code = response.json?.code;
-      if (code && code !== 0) return { error: response.json?.msg || String(code) };
-      const user = asRecord(response.json?.data?.user);
-      const name = typeof user?.name === "string" && user.name ? user.name : typeof user?.en_name === "string" ? user.en_name : undefined;
-      return { name };
-    } catch (error) {
-      return { error: error instanceof Error ? error.message : String(error) };
-    }
-  }
-
-  private async lookupMember(chatId: string, openId: string): Promise<string | undefined> {
+  private async lookupMember(chatId: string, openId: string): Promise<{ name?: string; error?: string }> {
     let pageToken: string | undefined;
     for (let page = 0; page < 5; page++) {
       try {
@@ -430,21 +413,21 @@ export class FeishuChannel implements ChannelAdapter {
           query: { member_id_type: "open_id", page_size: "100", page_token: pageToken },
         });
         const code = response.json?.code;
-        if (code && code !== 0) return undefined;
+        if (code && code !== 0) return { error: response.json?.msg || String(code) };
         const data = response.json?.data;
         const items = Array.isArray(data?.items) ? data.items : [];
         for (const item of items) {
           const record = asRecord(item);
           if (!record || String(record.member_id ?? "") !== openId) continue;
-          if (typeof record.name === "string" && record.name) return record.name;
+          if (typeof record.name === "string" && record.name) return { name: record.name };
         }
-        if (data?.has_more !== true || typeof data.page_token !== "string") return undefined;
+        if (data?.has_more !== true || typeof data.page_token !== "string") return {};
         pageToken = data.page_token;
-      } catch {
-        return undefined;
+      } catch (error) {
+        return { error: error instanceof Error ? error.message : String(error) };
       }
     }
-    return undefined;
+    return {};
   }
 
   private async fetchMessage(messageId: string): Promise<FeishuRawMessage | undefined> {
