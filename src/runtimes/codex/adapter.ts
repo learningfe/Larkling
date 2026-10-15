@@ -1,4 +1,4 @@
-import type { HealthItem, RuntimeAdapter, RuntimeEvent, RuntimeProfile, RuntimeRef, SessionSpec, TurnInput } from "../../protocol/types.js";
+import type { HealthItem, RuntimeAdapter, RuntimeEvent, RuntimeProfile, RuntimeRef, Seed, SessionSpec, TurnInput } from "../../protocol/types.js";
 import { AsyncQueue } from "../../util/async-queue.js";
 import { SteerRejected } from "../../core/errors.js";
 import { MemoryCodexTransport, StdioCodexTransport, type CodexTransport } from "./transport.js";
@@ -19,7 +19,14 @@ interface ThreadState {
   ourTurnId?: string;
   agentText: string;
   failed?: { message: string; retryable: boolean };
+  /** Seed for a brand-new thread. Sent on the first turn, then dropped. */
+  pendingSeed?: Seed;
+  /** Highest transcript seq already given to this thread. A seed at or below it is skipped. */
+  seededThroughSeq?: number;
 }
+
+/** Preface for transcript text injected into a new thread. The model must not answer it. */
+export const SEED_PREFACE = "Earlier conversation transcript (already happened; do not reply to it again):";
 
 const RETRYABLE = /HttpConnectionFailed|ResponseStreamConnectionFailed|ResponseStreamDisconnected|ResponseTooManyFailedAttempts|timeout/i;
 
@@ -64,15 +71,16 @@ export class CodexRuntime implements RuntimeAdapter {
     });
     const threadId = String(asRecord(result.thread)?.id ?? "");
     if (!threadId) throw new Error("thread/start did not return a thread id");
-    this.remember(threadId, session.sessionId, profile);
+    this.remember(threadId, session.sessionId, profile, session.seed);
     return threadId;
   }
 
   async start(ref: RuntimeRef, input: TurnInput): Promise<void> {
     const state = this.require(ref);
+    const seed = this.takeSeed(state);
     const result = await this.request("turn/start", {
       threadId: state.threadId,
-      input: toCodexInput(input),
+      input: toCodexInput(input, seed),
       ...turnConfig(state.profile),
     });
     state.codexTurnId = String(asRecord(result.turn)?.id ?? "");
@@ -135,10 +143,24 @@ export class CodexRuntime implements RuntimeAdapter {
     this.eventsQueue.close();
   }
 
-  private remember(threadId: string, sessionId: string, profile: RuntimeProfile): void {
+  private remember(threadId: string, sessionId: string, profile: RuntimeProfile, seed?: Seed): void {
     const state: ThreadState = { sessionId, threadId, profile, agentText: "" };
+    if (seed?.text.trim()) state.pendingSeed = seed;
     this.threads.set(threadId, state);
     this.byThread.set(threadId, threadId);
+  }
+
+  /**
+   * One seed per new thread. A seed that does not extend past `seededThroughSeq`
+   * is dropped so compacted entries already in the thread are not sent again.
+   */
+  private takeSeed(state: ThreadState): string | undefined {
+    const seed = state.pendingSeed;
+    state.pendingSeed = undefined;
+    if (!seed?.text.trim()) return undefined;
+    if (state.seededThroughSeq != null && seed.throughSeq <= state.seededThroughSeq) return undefined;
+    state.seededThroughSeq = seed.throughSeq;
+    return seed.text;
   }
 
   private require(ref: string): ThreadState {
@@ -310,8 +332,9 @@ function turnConfig(profile: RuntimeProfile): Record<string, unknown> {
   };
 }
 
-export function toCodexInput(input: TurnInput): unknown[] {
+export function toCodexInput(input: TurnInput, seed?: string): unknown[] {
   const items: unknown[] = [];
+  if (seed?.trim()) items.push({ type: "text", text: `${SEED_PREFACE}\n${seed.trim()}` });
   const text = [input.context, ...input.messages.map((message) => message.text)].filter(Boolean).join("\n\n");
   if (text) items.push({ type: "text", text });
   for (const message of input.messages) {

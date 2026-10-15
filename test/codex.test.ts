@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { CodexRuntime, mapSandbox, toCodexInput } from "../src/runtimes/codex/adapter.js";
+import { CodexRuntime, SEED_PREFACE, mapSandbox, toCodexInput } from "../src/runtimes/codex/adapter.js";
 import { MemoryCodexTransport, StdioCodexTransport } from "../src/runtimes/codex/transport.js";
 import type { RuntimeEvent, SessionSpec, TurnInput } from "../src/protocol/types.js";
+import { createHost } from "../src/core/host.js";
+import { MemoryChannel } from "../src/channels/memory.js";
+import { ManualClock } from "../src/core/clock.js";
+import { Logger } from "../src/log.js";
+import { message, tempDir, testConfig, waitFor } from "./helpers.js";
 
 function spec(partial: Partial<SessionSpec> = {}): SessionSpec {
   return {
@@ -18,12 +23,12 @@ function input(text = "hello"): TurnInput {
 }
 
 /** Reply to app-server requests the adapter has already written. */
-function drive(transport: MemoryCodexTransport): () => void {
+function drive(transport: MemoryCodexTransport, options?: { completeTurns?: boolean }): () => void {
   let cursor = 0;
   let threads = 0;
   const timer = setInterval(() => {
     while (cursor < transport.sent.length) {
-      const message = transport.sent[cursor++] as { id?: number; method?: string };
+      const message = transport.sent[cursor++] as { id?: number; method?: string; params?: { threadId?: string } };
       if (message.id == null || !message.method || message.method === "initialized") continue;
       if (message.method === "initialize") transport.push({ id: message.id, result: { userAgent: "test" } });
       else if (message.method === "thread/start" || message.method === "thread/resume") {
@@ -31,12 +36,25 @@ function drive(transport: MemoryCodexTransport): () => void {
         transport.push({ id: message.id, result: { thread: { id: `th_${threads}` } } });
       } else if (message.method === "turn/start" || message.method === "turn/steer") {
         transport.push({ id: message.id, result: { turn: { id: `ct_${message.id}` } } });
+        if (options?.completeTurns && message.method === "turn/start") {
+          const threadId = String(message.params?.threadId ?? "");
+          setTimeout(() => {
+            transport.push({ method: "item/completed", params: { threadId, item: { type: "agentMessage", text: "ok" } } });
+            transport.push({ method: "turn/completed", params: { threadId, turn: { status: "completed" } } });
+          }, 0);
+        }
       } else if (message.method === "turn/interrupt" || message.method === "thread/unsubscribe") {
         transport.push({ id: message.id, result: {} });
       } else transport.push({ id: message.id, error: { message: `unexpected ${message.method}` } });
     }
   }, 5);
   return () => clearInterval(timer);
+}
+
+function turnStarts(transport: MemoryCodexTransport): { type?: string; text?: string }[][] {
+  return transport.sent
+    .filter((item) => (item as { method?: string }).method === "turn/start")
+    .map((item) => (item as { params: { input: { type?: string; text?: string }[] } }).params.input);
 }
 
 async function take(events: RuntimeEvent[], type: RuntimeEvent["type"]): Promise<RuntimeEvent> {
@@ -148,6 +166,95 @@ describe("codex app-server adapter", () => {
     runtime.close();
     await reading;
     stop();
+  });
+
+  it("injects a new thread's seed into the first turn only", async () => {
+    const transport = new MemoryCodexTransport();
+    const stop = drive(transport);
+    const runtime = new CodexRuntime({ transport });
+    const events: RuntimeEvent[] = [];
+    const reading = (async () => {
+      for await (const event of runtime.events()) events.push(event);
+    })();
+    const ref = await runtime.open(
+      spec({ seed: { text: "Ada: hello\nassistant: ok", throughSeq: 4, estimatedTokens: 8 } }),
+    );
+    await runtime.start(ref, input("follow-up"));
+    const first = turnStarts(transport)[0];
+    expect(first[0]).toEqual({ type: "text", text: `${SEED_PREFACE}\nAda: hello\nassistant: ok` });
+    const joined = first.map((item) => item.text).join("\n");
+    expect(joined).toContain("follow-up");
+    expect(joined.indexOf(SEED_PREFACE)).toBeLessThan(joined.indexOf("follow-up"));
+
+    await runtime.start(ref, input("later"));
+    const second = turnStarts(transport)[1];
+    expect(second.map((item) => item.text ?? "").join("\n")).not.toContain(SEED_PREFACE);
+    expect(second.map((item) => item.text ?? "").join("\n")).not.toContain("Ada: hello");
+    expect(second.map((item) => item.text ?? "").join("\n")).toContain("later");
+
+    const resumed = await runtime.open(spec({ runtimeRef: ref, seed: { text: "should-not-repeat", throughSeq: 9, estimatedTokens: 4 } }));
+    await runtime.start(resumed, input("after resume"));
+    const third = turnStarts(transport).at(-1) ?? [];
+    expect(third.map((item) => item.text ?? "").join("\n")).not.toContain("should-not-repeat");
+    runtime.close();
+    await reading;
+    stop();
+  });
+
+  it("puts the seed on the first turn after an instructions change and not on the next turn", async () => {
+    const dir = await tempDir();
+    const config = await testConfig(dir, (draft) => {
+      draft.runtimes.codex.idleReleaseMs = 1_000;
+    });
+    const clock = new ManualClock(Date.parse("2026-03-15T02:00:00.000Z"));
+    const channel = new MemoryChannel(true);
+    const transport = new MemoryCodexTransport();
+    const stopDrive = drive(transport, { completeTurns: true });
+    const runtime = new CodexRuntime({ transport });
+    const host = await createHost({
+      config,
+      channel,
+      runtimes: new Map([["codex", runtime]]),
+      clock,
+      logger: new Logger(undefined, "error"),
+      bot: { ref: "ou_bot", stableId: "memory:bot", name: "Larkling" },
+      timers: false,
+    });
+    await host.start();
+    try {
+      channel.push(message({ text: "hello", messageId: "m1" }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await host.settle();
+      expect(turnStarts(transport)).toHaveLength(1);
+      expect(turnStarts(transport)[0].map((item) => item.text ?? "").join("\n")).not.toContain(SEED_PREFACE);
+
+      clock.advance(1_000);
+      await host.tick();
+      config.agents.front.instructions = "front instructions changed";
+      channel.push(message({ text: "follow-up", messageId: "m2" }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await host.settle();
+      await waitFor(() => turnStarts(transport).length >= 2, "reopened turn");
+      const reopened = turnStarts(transport)[1];
+      const transcript = reopened[0]?.text ?? "";
+      expect(transcript.startsWith(SEED_PREFACE)).toBe(true);
+      expect(transcript).toContain("Owner: hello");
+      expect(transcript).toContain("assistant: ok");
+      expect(transcript.slice(SEED_PREFACE.length)).not.toContain("follow-up");
+      const reopenedJoined = reopened.map((item) => item.text ?? "").join("\n");
+      expect(reopenedJoined.indexOf(SEED_PREFACE)).toBeLessThan(reopenedJoined.indexOf("follow-up"));
+
+      channel.push(message({ text: "third", messageId: "m3" }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await host.settle();
+      await waitFor(() => turnStarts(transport).length >= 3, "third turn");
+      const later = turnStarts(transport)[2].map((item) => item.text ?? "").join("\n");
+      expect(later).not.toContain(SEED_PREFACE);
+      expect(later).toContain("third");
+    } finally {
+      stopDrive();
+      await host.stop();
+    }
   });
 
   it("frames newline-delimited JSON on stdio", async () => {
