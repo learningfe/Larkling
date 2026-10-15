@@ -17,6 +17,7 @@ describe("in-memory channel and scripted runtime", () => {
     expect(h.channel.sent.map((item) => (item.action.type === "text" ? item.action.text : ""))).toEqual(["echo:hello"]);
     expect(conversation(h).phase).toBe("idle");
     expect(h.runtime.opens[0].instructions).toContain("front instructions");
+    expect(h.runtime.opens[0].instructions).toContain("Your name is Larkling");
     expect(h.runtime.starts[0].input.context).toContain("Token:");
     await pushAndSettle(h, message({ text: "quiet", messageId: "m2" }));
     expect(h.channel.sent).toHaveLength(1);
@@ -108,19 +109,60 @@ describe("in-memory channel and scripted runtime", () => {
     expect(h.channel.sent).toHaveLength(0);
   });
 
-  it("interrupts an owner /stop without sending the model reply", async () => {
-    const h = await startHarness();
+  it("judges later messages in a topic the bot has replied in", async () => {
+    const h = await startHarness((config) => {
+      config.im.gate.debounceMs = 1_000;
+      config.trust.groups = ["oc_family"];
+    });
     h.runtime.handler = async (turn) => {
-      await new Promise((resolve) => setTimeout(resolve, 30));
-      turn.emit({ type: "turn.completed", text: "should-not-send" });
+      if (turn.spec.kind === "judge") {
+        turn.emit({ type: "turn.completed", text: "RESPOND" });
+        return;
+      }
+      turn.emit({ type: "turn.completed", text: "front" });
     };
-    h.channel.push(message({ text: "work", messageId: "m1" }));
-    await waitFor(() => conversation(h)?.phase === "running", "running");
-    h.channel.push(message({ text: "/stop", messageId: "m2" }));
-    await h.host.settle();
-    expect(h.runtime.interrupts.length).toBeGreaterThan(0);
+    const scope = { channel: "memory", kind: "topic" as const, id: "omt_1", parentId: "oc_family" };
+    const human = { channel: "memory", ref: "ou_s", stableId: "feishu:on_stranger", name: "Sam", isBot: false };
+    await pushAndSettle(h, message({ text: "old chatter", messageId: "t0", scope, actor: human, mentionsSelf: false }));
+    expect(h.runtime.opens.filter((item) => item.kind === "judge")).toHaveLength(0);
     expect(h.channel.sent).toHaveLength(0);
-    expect(conversation(h).phase).toBe("idle");
+    await pushAndSettle(h, message({ text: "@bot", messageId: "t1", scope, actor: human, mentionsSelf: true }));
+    expect(h.channel.sent.some((item) => item.action.type === "text" && item.action.text === "front")).toBe(true);
+    expect(h.host.snapshot().participatedTopics).toContain("omt_1");
+    h.channel.push(message({ text: "follow up", messageId: "t2", scope, actor: human, mentionsSelf: false }));
+    await waitFor(() => h.host.snapshot().seenMessageIds.includes("t2"), "seen follow up");
+    await h.host.settle();
+    expect(h.runtime.opens.filter((item) => item.kind === "judge")).toHaveLength(0);
+    h.clock.advance(1_000);
+    await h.host.flushGate();
+    await h.host.settle();
+    expect(h.runtime.opens.some((item) => item.kind === "judge")).toBe(true);
+    expect(h.channel.sent.filter((item) => item.action.type === "text" && item.action.text === "front").length).toBeGreaterThan(1);
+  });
+
+  it("counts unread messages only after the bot last spoke", async () => {
+    const h = await startHarness();
+    const scope = { channel: "memory", kind: "dm" as const, id: "ou_owner" };
+    const old = Array.from({ length: 19 }, (_, index) => ({
+      messageId: `old${index}`,
+      scope,
+      actor: ownerActor(),
+      text: `old ${index}`,
+      attachments: [],
+      mentionsSelf: false,
+      occurredAt: "2026-03-15T01:00:00.000Z",
+    }));
+    h.channel.histories.set("ou_owner", old);
+    h.runtime.handler = async (turn) => turn.emit({ type: "turn.completed", text: "ok" });
+    await pushAndSettle(h, message({ text: "now", messageId: "m-now" }));
+    expect(h.runtime.starts[0].input.context).not.toContain("new messages arrived");
+    h.clock.advance(120_000);
+    h.channel.histories.set("ou_owner", [
+      { messageId: "mid1", scope, actor: ownerActor(), text: "between", attachments: [], mentionsSelf: false, occurredAt: "2026-03-15T02:01:00.000Z" },
+      { messageId: "mid2", scope, actor: ownerActor(), text: "between 2", attachments: [], mentionsSelf: false, occurredAt: "2026-03-15T02:01:30.000Z" },
+    ]);
+    await pushAndSettle(h, message({ text: "later", messageId: "m-later", occurredAt: "2026-03-15T02:02:00.000Z" }));
+    expect(h.runtime.starts.at(-1)?.input.context).toContain("Since you last spoke, 2 new messages arrived here.");
   });
 
   it("replies with the canned line for an unsupported mention and ignores stickers", async () => {

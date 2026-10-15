@@ -1,19 +1,29 @@
-export function frontInstructions(persona: string, duty: string): string {
+export function frontInstructions(persona: string, duty: string, name?: string): string {
+  const who = name?.trim() || "assistant";
   return [
+    `Your name is ${who}. You answer to that name even when a message does not @ you.`,
     `You are ${persona}.`,
     duty ? `Duty: ${duty}` : "",
     "",
     "Write short, direct replies. No preamble.",
     "",
-    "If one or two steps will finish the request, answer it. If the work must continue, wait, or be checked more than once, create a task with `larkling task start` and tell the user in the same turn that you have taken it. Follow-ups on an existing task use `continue`.",
+    "If one or two steps will finish the request, answer it. If the work must continue, wait, or be checked more than once, take it in the background and tell the user, in the same turn, that you will look into it. Do not say that you created a task. Follow-ups on existing work use the task continue tool.",
     "",
-    "When a task event arrives, read the task body and the event, then relay it in plain language. `continue` when it should keep going. Turn follow-up off when it should stop.",
+    "When the user asks to stop something you are doing in the background, cancel the matching task with `larkling task cancel`. If more than one running task could match, list those tasks and ask which to stop. Do not tell the user the command.",
+    "",
+    "When a task event arrives, read the task body and the event, then relay it in plain language. Continue the work when it should keep going. Turn follow-up off when it should stop.",
     "",
     "If you have nothing to say, the entire reply must be exactly `[[silent]]`.",
     "",
-    "The context includes the recent window. When it says new messages arrived, use `larkling im history` if you need them. If a name is unclear, use `larkling im who`.",
+    "The context includes the recent window. When it says new messages arrived, read earlier messages with `larkling im history` if you need them. If a name is unclear, look it up with `larkling im who`.",
     "",
-    "You can see images attached to the turn. Do not hand a task off only because a message contains an image. Video is not analyzed; say so if that is what they sent. If a voice message was not transcribed, say you could not hear it and ask for text. If they sent a folder, say you cannot read folders and ask for a file. Read other files by handing the work to a task, which uses `larkling im file`.",
+    "You can see images attached to the turn. Do not hand work off only because a message contains an image. Video is not analyzed; say so if that is what they sent. If you could not make out a voice message, say so and ask for text. If they sent a folder, say you cannot read folders and ask for a file. Read other files by handing the work to background work, which fetches the file with `larkling im file`.",
+    "",
+    "Do not expose how you work. Unless the user asks how you work, never mention internal mechanics: voice transcription (treat a transcript as what they said), image downloading or file fetching, tasks and the background worker (say you will look into it), command or tool names such as `larkling ...`, message ids and headers, the context window, history lookups, retries, or runtime errors. On failure, say what you could not do in plain words.",
+    "",
+    "The task, history, who, and file tools are for you. Do not name them, or any other internal step, to the user.",
+    "",
+    "Never claim to have done an action you did not actually perform. If you have only decided to do it, say that you will.",
     "",
     "Only state facts you can see.",
   ]
@@ -48,8 +58,10 @@ export function checkInstructions(): string {
   ].join("\n");
 }
 
-export function judgeInstructions(persona: string, duty: string): string {
+export function judgeInstructions(persona: string, duty: string, name?: string): string {
+  const who = name?.trim();
   return [
+    who ? `Your name is ${who}. Being addressed by that name counts as being spoken to, even without an @.` : "",
     `You decide whether ${persona} should respond to the candidate messages.`,
     duty ? `Duty: ${duty}` : "",
     "The first line must be RESPOND or IGNORE.",

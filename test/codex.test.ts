@@ -51,9 +51,12 @@ async function take(events: RuntimeEvent[], type: RuntimeEvent["type"]): Promise
 
 describe("codex app-server adapter", () => {
   it("maps sandbox names and turn input", () => {
-    expect(mapSandbox("read-only")).toBe("readOnly");
-    expect(mapSandbox("workspace-write")).toBe("workspaceWrite");
-    expect(mapSandbox("danger-full-access")).toBe("dangerFullAccess");
+    expect(mapSandbox("read-only")).toBe("read-only");
+    expect(mapSandbox("readOnly")).toBe("read-only");
+    expect(mapSandbox("workspace-write")).toBe("workspace-write");
+    expect(mapSandbox("workspaceWrite")).toBe("workspace-write");
+    expect(mapSandbox("danger-full-access")).toBe("danger-full-access");
+    expect(mapSandbox("dangerFullAccess")).toBe("danger-full-access");
     expect(toCodexInput(input())).toEqual([
       { type: "text", text: "Token: secret\n\nhello" },
       { type: "localImage", path: "/tmp/a.png" },
@@ -72,7 +75,7 @@ describe("codex app-server adapter", () => {
     expect(ref).toBe("th_1");
     const started = transport.sent.find((item) => (item as { method?: string }).method === "thread/start") as { params: Record<string, unknown> };
     expect(started.params.developerInstructions).toBe("be useful");
-    expect(started.params.sandbox).toBe("readOnly");
+    expect(started.params.sandbox).toBe("read-only");
     await runtime.start(ref, input());
     transport.push({
       method: "item/completed",

@@ -19,14 +19,14 @@ export async function startFeishuSocket(options: { appId: string; appSecret: str
     "im.message.reaction.deleted_v1": async (data) => {
       await options.channel.ingest(data);
     },
-    "card.action.trigger": async (data) => {
+    "card.action.trigger": async (data: unknown) => {
       await options.channel.ingest(data);
       return { toast: { type: "info", content: "已记录" } };
     },
   });
   const client = new lark.WSClient({ appId: options.appId, appSecret: options.appSecret });
-  client.start({ eventDispatcher: dispatcher });
+  await client.start({ eventDispatcher: dispatcher });
   return async () => {
-    client.close?.();
+    client.close();
   };
 }

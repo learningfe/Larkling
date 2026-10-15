@@ -66,7 +66,7 @@ export interface NormalizeResult {
   mentionsSelf: boolean;
   mentionsOthers: boolean;
   disposition: "normal" | "store_only" | "unsupported";
-  names: { stableId: string; ref: string; name: string }[];
+  names: { stableId: string; ref: string; name: string; aliases?: string[] }[];
 }
 
 const STORE_ONLY = new Set(["system", "hongbao", "sticker"]);
@@ -203,8 +203,10 @@ function namesFromMentions(mentions: FeishuMention[]): NormalizeResult["names"] 
   for (const mention of mentions) {
     const openId = mentionOpenId(mention);
     const unionId = mentionUnionId(mention);
-    if (!unionId || !openId || !mention.name) continue;
-    names.push({ stableId: `feishu:${unionId}`, ref: openId, name: mention.name });
+    if (!openId || !mention.name) continue;
+    if (mention.key === "@_all" || openId === "all") continue;
+    const aliases = unionId ? [`feishu-union:${unionId}`] : undefined;
+    names.push({ stableId: `feishu:${openId}`, ref: openId, name: mention.name, aliases });
   }
   return names;
 }

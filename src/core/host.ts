@@ -110,6 +110,7 @@ export class Host {
   private judgeWait: Array<{ scope: Scope; messages: MessageEvent[] }> = [];
   private lastHeartbeat = 0;
   private readonly useTimers: boolean;
+  private readParticipated: () => readonly string[] = () => [];
   private timerHandles: NodeJS.Timeout[] = [];
   private apiClose: (() => Promise<void>) | undefined;
   private loops: Promise<void>[] = [];
@@ -122,7 +123,7 @@ export class Host {
     this.log = options.logger ?? new Logger(join(options.config.stateDir, "log.jsonl"), "info");
     this.bot = options.bot ?? { ref: "bot", stableId: `${options.channel.channel}:bot`, name: "bot" };
     this.useTimers = options.timers ?? false;
-    this.gate = new Gate(options.config, options.channel.capabilities.readGroupMessages, this.clock);
+    this.gate = new Gate(options.config, options.channel.capabilities.readGroupMessages, this.clock, () => this.readParticipated());
   }
 
   async start(): Promise<void> {
@@ -132,6 +133,7 @@ export class Host {
     this.persons = await PersonDirectory.open(this.config.stateDir);
     this.transcripts = new TranscriptStore(this.config.stateDir);
     this.imlog = new ImLog(this.config.stateDir);
+    this.readParticipated = () => this.stateStore.get().participatedTopics;
     await this.recover();
     await this.cleanup();
     const api = await listenApi({
@@ -361,7 +363,7 @@ export class Host {
     const store = this.imlog.shouldStore({ scope: event.scope, mentionsSelf: event.mentionsSelf, fromBot }, participated);
     if (store) {
       await this.imlog.append(this.storedFrom(event, fromBot, trust));
-      if (event.scope.kind === "topic" && (event.mentionsSelf || fromBot)) {
+      if (event.scope.kind === "topic" && fromBot) {
         await this.stateStore.update((draft) => {
           if (!draft.participatedTopics.includes(event.scope.id)) draft.participatedTopics.push(event.scope.id);
         });
@@ -395,17 +397,6 @@ export class Host {
           [event.scope],
           sessionId,
         );
-      }
-      return;
-    }
-    if (trust === "owner" && event.scope.kind === "dm" && event.text.trim() === "/stop") {
-      const sessionId = conversationSessionId(event.scope);
-      if (this.stateStore.get().sessions[sessionId]) {
-        await this.stateStore.update((draft) => {
-          const session = draft.sessions[sessionId];
-          if (session) session.queue = [];
-        });
-        await this.interrupt(sessionId, "stop");
       }
       return;
     }
@@ -1156,17 +1147,20 @@ export class Host {
     let window: ImRecord[] = records;
     if (scope && (scope.kind === "dm" || this.channel.capabilities.readGroupMessages)) {
       const fetched = await this.safeHistory(scope, scope.kind === "topic" ? this.config.im.window.topic : this.config.im.window.group);
+      const stored = await this.imlog.load(scope.id);
       const merged = new Map<string, ImRecord>();
       for (const item of fetched) merged.set(item.messageId, item);
+      for (const item of stored) merged.set(item.messageId, item);
       for (const item of records) merged.set(item.messageId, item);
       window = selectWindow([...merged.values()], {
         limit: scope.kind === "dm" ? this.config.im.window.group : scope.kind === "topic" ? this.config.im.window.topic : this.config.im.window.group,
         maxTokens: this.config.im.window.maxTokens,
+        maxAgeMs: this.config.im.window.maxAgeMs,
+        now: this.clock.now(),
       });
     }
     for (const record of window) this.noteVisible(sessionId, record);
-    const lastBot = scope ? await this.imlog.lastBotMessage(scope.id, this.bot) : undefined;
-    const unread = unreadLine(window, messages.map((message) => message.messageId), lastBot?.messageId);
+    const unread = unreadLine(window, messages.map((message) => message.messageId), (record) => isSelf(record, this.bot.ref, this.bot.stableId));
     const tasks = Object.values(this.stateStore.get().tasks).filter((task) => task.parentSessionId === sessionId);
     const context = scope
       ? conversationContext({
@@ -1218,8 +1212,9 @@ export class Host {
   }
 
   private async safeHistory(scope: Scope, limit: number): Promise<ImRecord[]> {
+    const start = new Date(this.clock.now() - this.config.im.window.maxAgeMs).toISOString();
     try {
-      return await this.channel.history({ container: scope.id, limit, withRoot: scope.kind === "topic" });
+      return await this.channel.history({ container: scope.id, limit, start, withRoot: scope.kind === "topic" });
     } catch (error) {
       this.log.warn("history.failed", { container: scope.id, error: String(error) });
       return [];
@@ -1593,11 +1588,12 @@ export class Host {
   private instructionsFor(kind: SessionKind): string {
     const persona = this.config.persona.text;
     const duty = this.config.persona.duty;
+    const name = this.config.persona.name || this.bot.name || "assistant";
     if (kind === "task") return withFile(backInstructions(persona, duty), this.config.agents.back.instructions);
     if (kind === "check") return checkInstructions();
-    if (kind === "judge") return judgeInstructions(persona, duty);
+    if (kind === "judge") return judgeInstructions(persona, duty, name);
     if (kind === "compact") return compactInstructions();
-    return withFile(frontInstructions(persona, duty), this.config.agents.front.instructions);
+    return withFile(frontInstructions(persona, duty, name), this.config.agents.front.instructions);
   }
 
   private profileFor(kind: SessionKind) {

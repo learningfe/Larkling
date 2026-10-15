@@ -2,8 +2,8 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { FeishuChannel } from "../src/channels/feishu/adapter.js";
-import { transcribeAudio, withTempPcm } from "../src/channels/feishu/audio.js";
+import { FeishuChannel, feishuMessageBody, loadBotProfile } from "../src/channels/feishu/adapter.js";
+import { speechFileId, transcribeAudio, withTempPcm } from "../src/channels/feishu/audio.js";
 import { feishuUuid } from "../src/channels/feishu/card.js";
 import { normalizeFeishuMessage, type FeishuRawMessage, type NormalizeContext } from "../src/channels/feishu/content.js";
 import type { FeishuHttp, FeishuResponse } from "../src/channels/feishu/http.js";
@@ -56,7 +56,7 @@ describe("feishu message normalization", () => {
     expect(text.text).toBe("hi @我 @所有人");
     expect(text.mentionsSelf).toBe(true);
     expect(text.mentionsOthers).toBe(true);
-    expect(text.names).toEqual([{ stableId: "feishu:on_bot", ref: "ou_bot", name: "Bot" }]);
+    expect(text.names).toEqual([{ stableId: "feishu:ou_bot", ref: "ou_bot", name: "Bot", aliases: ["feishu-union:on_bot"] }]);
 
     const post = await normalize(
       raw({
@@ -206,6 +206,8 @@ describe("feishu adapter", () => {
     if (messages[0].type !== "message") throw new Error("expected message");
     expect(messages[0].mentionsSelf).toBe(true);
     expect(messages[0].text).toContain("@我");
+    expect(messages[0].actor.stableId).toBe("feishu:ou_u");
+    expect(messages[0].actor.aliases).toEqual(["feishu-union:on_u"]);
     expect(messages[0].scope).toEqual({ channel: "feishu", kind: "group", id: "oc_1" });
     expect(events.some((event) => event.type === "names")).toBe(true);
   });
@@ -221,8 +223,9 @@ describe("feishu adapter", () => {
       idempotencyKey: "not a uuid!!",
     });
     expect(sent.ok).toBe(true);
-    const body = http.calls[0].json as { uuid: string; receive_id: string };
+    const body = http.calls[0].json as { uuid: string; receive_id: string; msg_type: string };
     expect(body.uuid).toBe(feishuUuid("not a uuid!!"));
+    expect(body.msg_type).toBe("text");
     expect(http.calls[0].query?.receive_id_type).toBe("open_id");
     await bot.send({
       type: "approval_card",
@@ -254,12 +257,12 @@ describe("feishu adapter", () => {
     const dir = await mkdtemp(join(tmpdir(), "larkling-feishu-"));
     const bot = new FeishuChannel({ http, botOpenId: "ou_bot", readGroupMessages: true, stateDir: dir, ratePerSecond: 1000, clock: new ManualClock(0) });
     await bot.history({ container: "oc_1", start: "2026-03-01T00:00:00.000Z", end: "2026-03-02T00:00:00.000Z", limit: 20 });
-    expect(http.calls[0].query).toMatchObject({ container_id_type: "chat", container_id: "oc_1" });
+    expect(http.calls[0].query).toMatchObject({ container_id_type: "chat", container_id: "oc_1", sort_type: "ByCreateTimeDesc" });
     expect(http.calls[0].query?.start_time).toBeTruthy();
     expect(http.calls[0].query?.end_time).toBeTruthy();
     http.calls.length = 0;
     const topic = await bot.history({ container: "omt_1", limit: 20, withRoot: true });
-    expect(http.calls[0].query).toMatchObject({ container_id_type: "thread", container_id: "omt_1" });
+    expect(http.calls[0].query).toMatchObject({ container_id_type: "thread", container_id: "omt_1", sort_type: "ByCreateTimeDesc" });
     expect(http.calls[0].query?.start_time).toBeUndefined();
     expect(topic.some((item) => item.messageId === "om_root")).toBe(true);
   });
@@ -325,7 +328,8 @@ describe("feishu adapter", () => {
   it("chunks speech longer than a minute and retries a failed recognize once", async () => {
     const http = new FakeHttp();
     let attempts = 0;
-    http.handler = () => {
+    http.handler = (input) => {
+      expect((input.json as { config: { file_id: string } }).config.file_id).toMatch(/^[a-z0-9]{16}$/);
       attempts += 1;
       if (attempts === 1) return { status: 500, json: { code: 1, msg: "busy" } };
       return { status: 200, json: { code: 0, data: { recognition_text: "ok" } } };
@@ -344,5 +348,145 @@ describe("feishu adapter", () => {
       await writeFile(output, Buffer.from("out"));
     });
     expect(pcm.toString()).toBe("out");
+    expect(speechFileId()).toMatch(/^[a-z0-9]{16}$/);
+  });
+
+  it("logs speech recognition failures", async () => {
+    const http = new FakeHttp();
+    const logs: Record<string, unknown>[] = [];
+    http.handler = () => ({ status: 200, json: { code: 4001, msg: "invalid file_id" } });
+    const failed = await transcribeAudio({
+      http,
+      pcm: Buffer.from("x"),
+      limiter: new RateLimiter(1000, new ManualClock(0)),
+      durationMs: 1_000,
+      log: (fields) => logs.push(fields),
+    });
+    expect(failed).toEqual({ status: "failed" });
+    expect(logs).toEqual([
+      { code: 4001, msg: "invalid file_id", attempt: 0 },
+      { code: 4001, msg: "invalid file_id", attempt: 1 },
+    ]);
+    http.handler = () => {
+      throw new Error("socket down");
+    };
+    logs.length = 0;
+    const thrown = await transcribeAudio({
+      http,
+      pcm: Buffer.from("x"),
+      limiter: new RateLimiter(1000, new ManualClock(0)),
+      durationMs: 1_000,
+      log: (fields) => logs.push(fields),
+    });
+    expect(thrown.status).toBe("failed");
+    expect(logs[0]).toMatchObject({ error: "socket down", attempt: 0 });
+  });
+
+  it("reads bot open_id from bot and falls back to data", async () => {
+    const http = new FakeHttp();
+    http.handler = () => ({ status: 200, json: { code: 0, bot: { open_id: "ou_bot", app_name: "小灵" } } });
+    expect(await loadBotProfile(http)).toEqual({ openId: "ou_bot", appName: "小灵" });
+    http.handler = () => ({ status: 200, json: { code: 0, data: { open_id: "ou_old", app_name: "旧名" } } });
+    expect(await loadBotProfile(http)).toEqual({ openId: "ou_old", appName: "旧名" });
+  });
+
+  it("sends markdown as post and tables as a json 2.0 card", () => {
+    const post = feishuMessageBody("**bold**\n- item\n[docs](https://example.com)");
+    expect(post.msg_type).toBe("post");
+    expect(JSON.parse(post.content)).toEqual({ zh_cn: { content: [[{ tag: "md", text: "**bold**\n- item\n[docs](https://example.com)" }]] } });
+    const card = feishuMessageBody("| a | b |\n| --- | --- |\n| 1 | 2 |");
+    expect(card.msg_type).toBe("interactive");
+    expect(JSON.parse(card.content)).toMatchObject({ schema: "2.0", body: { elements: [{ tag: "markdown" }] } });
+    expect(feishuMessageBody("好的").msg_type).toBe("text");
+  });
+
+  it("replies in a topic thread with the same rich-text body", async () => {
+    const http = new FakeHttp();
+    const dir = await mkdtemp(join(tmpdir(), "larkling-feishu-"));
+    const bot = new FeishuChannel({ http, botOpenId: "ou_bot", readGroupMessages: true, stateDir: dir, ratePerSecond: 1000, clock: new ManualClock(0) });
+    await bot.send({
+      type: "text",
+      scope: { channel: "feishu", kind: "topic", id: "omt_1", parentId: "oc_1" },
+      text: "**done**",
+      replyTo: "om_1",
+      idempotencyKey: "reply-1",
+    });
+    const body = http.calls[0].json as { msg_type: string; reply_in_thread: boolean; content: string };
+    expect(body.msg_type).toBe("post");
+    expect(body.reply_in_thread).toBe(true);
+    expect(JSON.parse(body.content).zh_cn.content[0][0].tag).toBe("md");
+  });
+
+  it("resolves sender names from contacts, then chat members, and uses the bot name", async () => {
+    const http = new FakeHttp();
+    http.handler = (input) => {
+      if (input.path.includes("/contact/v3/users/ou_known")) return { status: 200, json: { code: 0, data: { user: { name: "陈睿" } } } };
+      if (input.path.includes("/contact/v3/users/ou_member")) return { status: 403, json: { code: 99991672, msg: "no permission" } };
+      if (input.path.includes("/members")) return { status: 200, json: { code: 0, data: { items: [{ member_id: "ou_member", name: "群里的人" }] } } };
+      return { status: 200, json: { code: 0, data: {} } };
+    };
+    const dir = await mkdtemp(join(tmpdir(), "larkling-feishu-"));
+    const warnings: Record<string, unknown>[] = [];
+    const bot = new FeishuChannel({
+      http,
+      botOpenId: "ou_bot",
+      botName: "小灵",
+      readGroupMessages: true,
+      stateDir: dir,
+      ratePerSecond: 1000,
+      clock: new ManualClock(0),
+      log: { warn: (_event, fields) => warnings.push(fields ?? {}) },
+    });
+    const events = await collect(bot, async () => {
+      await bot.ingest(receive("ou_known", "on_known", "om_known"));
+      await bot.ingest(receive("ou_member", "on_member", "om_member"));
+      await bot.ingest(receive("ou_bot", "on_bot", "om_self", "app"));
+    });
+    const messages = events.filter((event) => event.type === "message");
+    expect(messages.map((event) => (event.type === "message" ? event.actor.name : ""))).toEqual(["陈睿", "群里的人", "小灵"]);
+    expect(http.calls.some((call) => call.path.includes("/contact/v3/users/ou_bot"))).toBe(false);
+    expect(warnings.some((item) => item.openId === "ou_member")).toBe(false);
+  });
+
+  it("stops paging a thread once a page is older than the window", async () => {
+    const http = new FakeHttp();
+    let pages = 0;
+    http.handler = () => {
+      pages += 1;
+      return {
+        status: 200,
+        json: {
+          code: 0,
+          data: {
+            items: [{ message_id: `old${pages}`, create_time: "1000", msg_type: "text", content: { text: "old" }, chat_id: "oc_1" }],
+            has_more: true,
+            page_token: "next",
+          },
+        },
+      };
+    };
+    const dir = await mkdtemp(join(tmpdir(), "larkling-feishu-"));
+    const bot = new FeishuChannel({ http, botOpenId: "ou_bot", readGroupMessages: true, stateDir: dir, ratePerSecond: 1000, clock: new ManualClock(0) });
+    const records = await bot.history({ container: "omt_old", start: "2026-03-01T00:00:00.000Z", limit: 20 });
+    expect(pages).toBe(1);
+    expect(records).toHaveLength(0);
+    expect(http.calls[0].query?.start_time).toBeUndefined();
   });
 });
+
+function receive(openId: string, unionId: string, messageId: string, senderType = "user") {
+  return {
+    header: { event_id: messageId, event_type: "im.message.receive_v1" },
+    event: {
+      sender: { sender_type: senderType, sender_id: { open_id: openId, union_id: unionId } },
+      message: {
+        message_id: messageId,
+        chat_id: "oc_1",
+        chat_type: "group",
+        message_type: "text",
+        content: JSON.stringify({ text: "hello" }),
+        create_time: "1710000000000",
+      },
+    },
+  };
+}

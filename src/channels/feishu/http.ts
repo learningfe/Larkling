@@ -1,6 +1,11 @@
 export interface FeishuResponse {
   status: number;
-  json?: { code?: number; msg?: string; data?: Record<string, unknown> & { recognition_text?: string } };
+  json?: {
+    code?: number;
+    msg?: string;
+    bot?: { open_id?: string; app_name?: string };
+    data?: Record<string, unknown> & { recognition_text?: string; open_id?: string; app_name?: string };
+  };
   body?: Buffer;
 }
 

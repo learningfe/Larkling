@@ -35,6 +35,8 @@ describe("config", () => {
     expect(loaded.stateDir).toBe(join(dir, "state"));
     expect(loaded.channel).toEqual({ kind: "memory", readGroupMessages: true });
     expect(loaded.persona.text).toBe("a personal assistant");
+    expect(loaded.persona.name).toBe("");
+    expect(loaded.im.window.maxAgeMs).toBe(24 * 3_600_000);
   });
 
   it("leaves pi and dsh unimplemented", () => {

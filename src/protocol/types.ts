@@ -22,10 +22,15 @@ export interface Actor {
   channel: string;
   /** Platform address id. Only the channel adapter interprets it. */
   ref: string;
-  /** Stable key. Feishu uses `feishu:<union_id>`. */
+  /** Stable key. Feishu uses `feishu:<open_id>`. */
   stableId: string;
   name: string;
   isBot: boolean;
+  /**
+   * Extra identity keys, such as `feishu-union:<union_id>`.
+   * Not the person key and not the DM address.
+   */
+  aliases?: string[];
 }
 
 export interface Person {
@@ -82,7 +87,7 @@ export type ChannelEvent =
       actor: Actor;
       decision: "approve" | "deny";
     }
-  | { type: "names"; entries: { stableId: string; ref: string; name: string }[] };
+  | { type: "names"; entries: { stableId: string; ref: string; name: string; aliases?: string[] }[] };
 
 export type SessionKind = "conversation" | "task" | "check" | "judge" | "compact";
 
@@ -309,7 +314,7 @@ export interface ActiveTurn {
   /** Stable id of the user message that opened the turn, when there was one. */
   sourceStableId?: string;
   /** Why the core interrupted, if it did. */
-  interruptReason?: "stop" | "watchdog" | "cancel" | "timeout" | "lost" | "restart";
+  interruptReason?: "watchdog" | "cancel" | "timeout" | "lost" | "restart";
 }
 
 export interface SessionRecord {

@@ -14,6 +14,8 @@ const MAX_DOWNLOAD = 100 * 1024 * 1024;
 export interface FeishuChannelOptions {
   http: FeishuHttp;
   botOpenId: string;
+  /** App name from bot/v3/info, used when this bot is the sender. */
+  botName?: string;
   readGroupMessages: boolean;
   stateDir: string;
   timeZone?: string;
@@ -21,6 +23,7 @@ export interface FeishuChannelOptions {
   speechPerSecond?: number;
   clock?: Clock;
   ffmpeg?: (input: string, output: string) => Promise<void>;
+  log?: { warn(event: string, fields?: Record<string, unknown>): void };
 }
 
 /**
@@ -37,6 +40,8 @@ export class FeishuChannel implements ChannelAdapter {
   private readonly limiter: RateLimiter;
   private readonly speech: RateLimiter;
   private readonly clock: Clock;
+  private readonly names = new Map<string, string>();
+  private readonly nameMisses = new Set<string>();
 
   constructor(private readonly options: FeishuChannelOptions) {
     this.capabilities = { readGroupMessages: options.readGroupMessages };
@@ -75,12 +80,12 @@ export class FeishuChannel implements ChannelAdapter {
       });
       return this.sent(response);
     }
-    const content = JSON.stringify({ text: action.text });
+    const body = feishuMessageBody(action.text);
     if (action.replyTo) {
       const response = await this.options.http.request({
         method: "POST",
         path: `/open-apis/im/v1/messages/${action.replyTo}/reply`,
-        json: { msg_type: "text", content, uuid, reply_in_thread: action.scope.kind === "topic" },
+        json: { ...body, uuid, reply_in_thread: action.scope.kind === "topic" },
       });
       return this.sent(response);
     }
@@ -89,7 +94,7 @@ export class FeishuChannel implements ChannelAdapter {
       method: "POST",
       path: "/open-apis/im/v1/messages",
       query: { receive_id_type: openId ? "open_id" : "chat_id" },
-      json: { receive_id: action.scope.id, msg_type: "text", content, uuid },
+      json: { receive_id: action.scope.id, ...body, uuid },
     });
     return this.sent(response);
   }
@@ -113,12 +118,14 @@ export class FeishuChannel implements ChannelAdapter {
             container_id: q.container,
             page_size: "50",
             page_token: pageToken,
-            sort_type: "ByCreateTimeAsc",
+            sort_type: "ByCreateTimeDesc",
           },
         });
         const data = response.json?.data ?? {};
         const items = (data.items as FeishuRawMessage[] | undefined) ?? [];
         collected.push(...items);
+        const oldest = items[items.length - 1];
+        if (q.start && oldest && !inTime(oldest.create_time, q.start, undefined)) break;
         if (!data.has_more || typeof data.page_token !== "string") break;
         pageToken = data.page_token;
       }
@@ -133,7 +140,7 @@ export class FeishuChannel implements ChannelAdapter {
           page_size: String(Math.min(Math.max(q.limit, 1), 50)),
           start_time: q.start ? toUnix(q.start) : undefined,
           end_time: q.end ? toUnix(q.end) : undefined,
-          sort_type: "ByCreateTimeAsc",
+          sort_type: "ByCreateTimeDesc",
         },
       });
       collected.push(...(((response.json?.data?.items as FeishuRawMessage[] | undefined) ?? [])));
@@ -143,15 +150,21 @@ export class FeishuChannel implements ChannelAdapter {
       const rootId = raw.find((item) => item.root_id)?.root_id;
       if (rootId && !raw.some((item) => item.message_id === rootId)) {
         const root = await this.fetchMessage(rootId);
-        if (root) raw = [root, ...raw];
+        if (root && inTime(root.create_time, q.start, q.end)) raw = [root, ...raw];
       }
     }
     const inWindow = new Set(raw.map((item) => item.message_id).filter((id): id is string => Boolean(id)));
     const records: ImRecord[] = [];
     for (const item of raw) {
       const normalized = await this.normalize(item, inWindow);
+      const name = await this.displayNameFor(normalized.record.actor.ref, {
+        mentionName: normalized.senderName,
+        chatId: String(item.chat_id ?? ""),
+      });
+      if (name) normalized.record.actor.name = name;
       records.push(normalized.record);
     }
+    records.sort((a, b) => a.occurredAt.localeCompare(b.occurredAt) || a.messageId.localeCompare(b.messageId));
     return records.slice(-q.limit);
   }
 
@@ -256,8 +269,15 @@ export class FeishuChannel implements ChannelAdapter {
     const actor = actorFromIds(senderId, String(sender?.sender_type ?? "user"), "");
     const scope = scopeFrom(message);
     const normalized = await this.normalize(message, new Set());
-    if (normalized.record.actor) actor.name = normalized.senderName || actor.name;
-    const names = normalized.names;
+    const resolvedName = await this.displayNameFor(actor.ref, {
+      mentionName: normalized.senderName,
+      chatId: String(message.chat_id ?? scope.parentId ?? scope.id),
+    });
+    if (resolvedName) actor.name = resolvedName;
+    const names = [...normalized.names];
+    if (actor.name && actor.ref && !names.some((entry) => entry.stableId === actor.stableId)) {
+      names.unshift({ stableId: actor.stableId, ref: actor.ref, name: actor.name, aliases: actor.aliases });
+    }
     const occurredAt = millisToIso(String(message.create_time ?? Date.now()));
     const events: ChannelEvent[] = [];
     if (names.length) events.push({ type: "names", entries: names });
@@ -307,7 +327,7 @@ export class FeishuChannel implements ChannelAdapter {
           const id = item.id;
           return (typeof id === "string" ? id : id?.open_id) === openId;
         });
-        return mention?.name;
+        return this.displayNameFor(openId, { mentionName: mention?.name, chatId: String(message.chat_id ?? "") });
       },
     });
     const senderName = mentions.find((item) => mentionOpen(item) === (message.sender?.sender_id?.open_id || message.sender?.id))?.name ?? "";
@@ -335,11 +355,96 @@ export class FeishuChannel implements ChannelAdapter {
       const { readFile } = await import("node:fs/promises");
       const encoded = await readFile(path);
       const pcm = await withTempPcm(encoded, this.options.ffmpeg ?? ffmpegToPcm);
-      const result = await transcribeAudio({ http: this.options.http, pcm, limiter: this.speech, durationMs });
+      const result = await transcribeAudio({
+        http: this.options.http,
+        pcm,
+        limiter: this.speech,
+        durationMs,
+        log: (fields) => this.options.log?.warn("speech.recognize_failed", fields),
+      });
       return { durationMs, ...result };
-    } catch {
+    } catch (error) {
+      this.options.log?.warn("speech.failed", { error: error instanceof Error ? error.message : String(error) });
       return { durationMs, status: "failed" };
     }
+  }
+
+  /**
+   * Display name for an open_id. Mention text wins, then the contact user
+   * API, then chat members. A miss is logged once and does not fail the message.
+   */
+  private async displayNameFor(openId: string, hints: { mentionName?: string; chatId?: string }): Promise<string> {
+    if (!openId || openId === "all") return "";
+    const cached = this.names.get(openId);
+    if (cached) return cached;
+    if (this.options.botOpenId && openId === this.options.botOpenId && this.options.botName) {
+      this.names.set(openId, this.options.botName);
+      return this.options.botName;
+    }
+    if (hints.mentionName) {
+      this.names.set(openId, hints.mentionName);
+      return hints.mentionName;
+    }
+    if (this.nameMisses.has(openId)) return "";
+    const contact = await this.lookupContact(openId);
+    if (contact.name) {
+      this.names.set(openId, contact.name);
+      return contact.name;
+    }
+    const member = hints.chatId ? await this.lookupMember(hints.chatId, openId) : undefined;
+    if (member) {
+      this.names.set(openId, member);
+      return member;
+    }
+    this.nameMisses.add(openId);
+    this.options.log?.warn("name.lookup_failed", { openId, detail: contact.error || "no display name" });
+    return "";
+  }
+
+  private async lookupContact(openId: string): Promise<{ name?: string; error?: string }> {
+    try {
+      await this.limiter.take();
+      const response = await this.options.http.request({
+        method: "GET",
+        path: `/open-apis/contact/v3/users/${encodeURIComponent(openId)}`,
+        query: { user_id_type: "open_id" },
+      });
+      const code = response.json?.code;
+      if (code && code !== 0) return { error: response.json?.msg || String(code) };
+      const user = asRecord(response.json?.data?.user);
+      const name = typeof user?.name === "string" && user.name ? user.name : typeof user?.en_name === "string" ? user.en_name : undefined;
+      return { name };
+    } catch (error) {
+      return { error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  private async lookupMember(chatId: string, openId: string): Promise<string | undefined> {
+    let pageToken: string | undefined;
+    for (let page = 0; page < 5; page++) {
+      try {
+        await this.limiter.take();
+        const response = await this.options.http.request({
+          method: "GET",
+          path: `/open-apis/im/v1/chats/${encodeURIComponent(chatId)}/members`,
+          query: { member_id_type: "open_id", page_size: "100", page_token: pageToken },
+        });
+        const code = response.json?.code;
+        if (code && code !== 0) return undefined;
+        const data = response.json?.data;
+        const items = Array.isArray(data?.items) ? data.items : [];
+        for (const item of items) {
+          const record = asRecord(item);
+          if (!record || String(record.member_id ?? "") !== openId) continue;
+          if (typeof record.name === "string" && record.name) return record.name;
+        }
+        if (data?.has_more !== true || typeof data.page_token !== "string") return undefined;
+        pageToken = data.page_token;
+      } catch {
+        return undefined;
+      }
+    }
+    return undefined;
   }
 
   private async fetchMessage(messageId: string): Promise<FeishuRawMessage | undefined> {
@@ -363,19 +468,21 @@ function actorFromMessage(message: FeishuRawMessage): Actor {
   const sender = message.sender;
   const ids = sender?.sender_id ?? {};
   const openId = ids.open_id || (sender?.id_type === "open_id" ? sender.id : "") || "";
-  const unionId = ids.union_id || (sender?.id_type === "union_id" ? sender.id : "") || openId;
+  const unionId = ids.union_id || (sender?.id_type === "union_id" ? sender.id : "") || "";
   return actorFromIds({ open_id: openId, union_id: unionId }, sender?.sender_type ?? "user");
 }
 
 function actorFromIds(ids: Record<string, unknown>, senderType: string, name = ""): Actor {
   const openId = String(ids.open_id ?? ids.openId ?? "");
-  const unionId = String(ids.union_id ?? ids.unionId ?? openId);
+  const unionId = String(ids.union_id ?? ids.unionId ?? "");
+  const stableId = openId ? `feishu:${openId}` : unionId ? `feishu-union:${unionId}` : "feishu:unknown";
   return {
     channel: "feishu",
     ref: openId,
-    stableId: `feishu:${unionId}`,
+    stableId,
     name,
     isBot: senderType === "app" || senderType === "bot",
+    aliases: openId && unionId ? [`feishu-union:${unionId}`] : undefined,
   };
 }
 
@@ -414,8 +521,58 @@ function inTime(createTime: string | undefined, start?: string, end?: string): b
   return true;
 }
 
-export async function loadBotOpenId(http: FeishuHttp): Promise<string | undefined> {
+export interface BotProfile {
+  openId?: string;
+  appName?: string;
+}
+
+export async function loadBotProfile(http: FeishuHttp): Promise<BotProfile> {
   const response = await http.request({ method: "GET", path: "/open-apis/bot/v3/info" });
-  const openId = response.json?.data?.open_id;
-  return typeof openId === "string" ? openId : undefined;
+  const bot = response.json?.bot;
+  const data = response.json?.data;
+  return {
+    openId: textOrUndefined(bot?.open_id) ?? textOrUndefined(data?.open_id),
+    appName: textOrUndefined(bot?.app_name) ?? textOrUndefined(data?.app_name),
+  };
+}
+
+export async function loadBotOpenId(http: FeishuHttp): Promise<string | undefined> {
+  return (await loadBotProfile(http)).openId;
+}
+
+function textOrUndefined(value: unknown): string | undefined {
+  return typeof value === "string" && value ? value : undefined;
+}
+
+/**
+ * Short plain replies stay text. Markdown tables use a JSON 2.0 card, which
+ * renders tables. Other markdown uses a post `md` element.
+ */
+export function feishuMessageBody(text: string): { msg_type: "text" | "post" | "interactive"; content: string } {
+  if (hasMarkdownTable(text)) {
+    return {
+      msg_type: "interactive",
+      content: JSON.stringify({
+        schema: "2.0",
+        config: { update_multi: true },
+        body: { elements: [{ tag: "markdown", content: text }] },
+      }),
+    };
+  }
+  if (isPlainShort(text)) return { msg_type: "text", content: JSON.stringify({ text }) };
+  return { msg_type: "post", content: JSON.stringify({ zh_cn: { content: [[{ tag: "md", text }]] } }) };
+}
+
+function hasMarkdownTable(text: string): boolean {
+  const lines = text.split(/\r?\n/);
+  const separator = /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/;
+  for (let index = 0; index < lines.length - 1; index++) {
+    if (lines[index].includes("|") && separator.test(lines[index + 1])) return true;
+  }
+  return false;
+}
+
+function isPlainShort(text: string): boolean {
+  if (text.includes("\n") || text.length > 120) return false;
+  return !/[*_`#[\]|]/.test(text);
 }

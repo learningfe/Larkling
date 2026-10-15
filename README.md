@@ -17,6 +17,8 @@ src/cli/          larkling 命令
 
 配置默认读 `LARKLING_CONFIG`，否则是 `~/.larkling/config.yaml`。状态目录默认 `~/.larkling/state`，可用 `LARKLING_STATE_DIR` 覆盖。飞书密钥用 `LARKLING_APP_SECRET`（配置里写 `env:LARKLING_APP_SECRET`）。任务 API 只监听 `127.0.0.1`，地址写在状态目录的 `api.url`，所有者令牌写在 `owner.token`（权限 0600）。示例见 `examples/config.yaml`。
 
+`owner` 写成 `feishu:` 加上你的 `open_id`（`ou_` 开头）。`union_id` 只作为附加身份保存，不是主键。`persona.name` 不写时，启动后用飞书应用名称（`/open-apis/bot/v3/info` 的 `app_name`）。群和话题的近期窗口除了条数和 token，还按 `im.window.maxAge` 丢掉更早的消息，默认 24 小时。机器人已经回复过的话题里，之后没 @ 的消息会走相关性判断；某个 scope 在 `respondTo.scopes` 里写了规则时，以配置为准。要停掉后台任务，直接用自然语言说，前台会取消对应任务；对得上不止一个时，会先列出来问你。
+
 ## 命令
 
 ```
@@ -47,16 +49,16 @@ npm test
 自动化测试替换了飞书长连接和开放平台。下面这套是第一次接到真机器人时的手工检查。
 
 1. 在飞书开放平台创建一个企业自建应用，打开机器人能力。
-2. 开通权限：`im:message`、`im:message.group_msg`（敏感权限，需要管理员审批）、`im:chat:readonly`、`speech_to_text:speech`。没有群消息权限时，把配置里的 `readGroupMessages` 留成 `false`。
+2. 开通权限：`im:message`、`im:message.group_msg`（敏感权限，需要管理员审批）、`im:chat:readonly`、`speech_to_text:speech`。要在上下文里显示真实姓名，再加 `contact:user.base:readonly`（`GET /open-apis/contact/v3/users/:user_id` 的姓名字段；人还得在应用的通讯录权限范围内）。通讯录查不到时，会改查群成员列表 `GET /open-apis/im/v1/chats/:chat_id/members`，姓名在 `items[].name`。`im:chat:readonly` 已经覆盖这个接口；也可以改开更窄的 `im:chat.members:read`。没有群消息权限时，把配置里的 `readGroupMessages` 留成 `false`。
 3. 事件订阅使用长连接，订阅 `im.message.receive_v1`、`im.message.recalled_v1`、`im.message.reaction.created_v1`、`im.message.reaction.deleted_v1`、`card.action.trigger`。不要订阅消息编辑事件，这一版会直接丢掉。
-4. 安装长连接 SDK（运行 `larkling start` 时才需要，测试不需要）：
+4. 安装依赖并编译。长连接 SDK `@larksuiteoapi/node-sdk` 已经在依赖里，`npm install` 就够，不用再单独装：
 
    ```bash
-   npm install @larksuiteoapi/node-sdk
+   npm install
    npm run build
    ```
 
-5. 把 `examples/config.yaml` 复制到 `~/.larkling/config.yaml`。`owner` 写成 `feishu:` 加上你自己的 `union_id`。`appId` 换成应用的 App ID。
+5. 把 `examples/config.yaml` 复制到 `~/.larkling/config.yaml`。`owner` 写成 `feishu:` 加上你自己的 `open_id`。`appId` 换成应用的 App ID。模型换成你的 Codex 账号支持的名字，示例里是 `gpt-6.1-sol` 和 `gpt-6-luna`。
 6. 导出密钥并检查配置：
 
    ```bash
@@ -66,10 +68,10 @@ npm test
    node dist/cli/index.js start
    ```
 
-   本机需要有 `codex` 命令，并且支持 `codex app-server`。语音消息还需要 `ffmpeg`。
-7. 在飞书里私聊这个机器人，发一句普通文字，确认有回复。再在已把机器人拉进去的群里 @ 它。所有者私聊里发 `/stop` 会打断当前这一轮，不往外发模型的回复。需要批准的操作会在所有者私聊里发一张一次性卡片。
+   本机需要有 `codex` 命令，并且支持 `codex app-server`。PATH 上较旧的 `codex` 可能不支持配置里的新模型，把 `runtimes.codex.command` 指到更新的二进制。语音消息还需要 `ffmpeg`。启动日志里如果出现 `bot.open_id_unresolved`，群里的 @ 会被忽略，先核对应用凭证和 `/bot/v3/info`。
+7. 在飞书里私聊这个机器人，发一句普通文字，确认有回复。再在已把机器人拉进去的群里 @ 它。带表格的回复会发成 JSON 2.0 卡片里的 markdown，其余 Markdown 用富文本 post。需要批准的操作会在所有者私聊里发一张一次性卡片。要停掉正在跑的后台任务，直接说停哪一件。
 
-真机上仍要核对的地方：`@_all` 的事件形态、语音文件的容器格式、语音识别接口的实际返回字段和租户 QPS，以及本机 `codex app-server` 的字段名是否与当前适配器一致。
+真机上仍要核对的地方：`@_all` 的事件形态、语音文件的容器格式、语音识别接口的实际返回字段和租户 QPS、卡片和富文本在客户端里的渲染，以及本机 `codex app-server` 的字段名是否与当前适配器一致。
 
 ## 这一版没有做的
 

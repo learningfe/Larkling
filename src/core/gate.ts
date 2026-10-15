@@ -11,7 +11,8 @@ export interface PendingBatch {
 
 /**
  * Relevance gate. Mentions and DMs skip it. Other group messages are dropped,
- * or debounced and judged when the scope is configured as relevant.
+ * or debounced and judged when the scope is relevant. A topic the bot has
+ * already replied in is relevant unless config names that scope explicitly.
  * Debounce is trailing: the deadline moves to now + debounce on every arrival.
  */
 export class Gate {
@@ -21,10 +22,14 @@ export class Gate {
     private readonly config: LarklingConfig,
     private readonly readGroupMessages: boolean,
     private readonly clock: Clock,
+    private readonly participated: () => readonly string[] = () => [],
   ) {}
 
   modeFor(scope: Scope): "mention" | "relevant" {
-    return this.config.im.respondTo.scopes[scope.id] ?? this.config.im.respondTo.scopes[scope.parentId ?? ""] ?? this.config.im.respondTo.default;
+    const explicit = this.config.im.respondTo.scopes[scope.id] ?? (scope.parentId ? this.config.im.respondTo.scopes[scope.parentId] : undefined);
+    if (explicit) return explicit;
+    if (scope.kind === "topic" && this.participated().includes(scope.id)) return "relevant";
+    return this.config.im.respondTo.default;
   }
 
   /**

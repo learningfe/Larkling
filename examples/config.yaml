@@ -1,6 +1,10 @@
 # 复制到 ~/.larkling/config.yaml 后按自己的应用改。
 # appSecret 只能写 env:变量名，明文会被拒绝。
 # 以 ./ ../ / ~ 开头的 instructions、soul、local 会按文件读取，文件必须存在。
+#
+# 模型必须是当前 Codex 账号实际支持的。ChatGPT 登录的账号常见可用：
+# 主模型 gpt-6.1-sol，轻量 gpt-6-luna。PATH 上较旧的 codex 可能不认识这些模型，
+# 把 runtimes.codex.command 写成新二进制的路径即可。
 
 stateDir: ~/.larkling/state
 timezone: Asia/Shanghai
@@ -18,31 +22,35 @@ channel:
     speechRatePerSecond: 20
     domain: https://open.feishu.cn
 
-owner: feishu:on_owner
+# 身份主键是 open_id：feishu:ou_xxx。union_id 只作为附加引用，不能写在这里。
+owner: feishu:ou_xxx
 trust:
   trusted: []
   allowed: []
   groups: []
 
 im:
-  window: { group: 20, topic: 20, maxTokens: 4000 }
+  # maxAge 会丢掉更早的历史，默认 24 小时，另外还受条数和 token 限制。
+  window: { group: 20, topic: 20, maxTokens: 4000, maxAge: 24h }
   respondTo: { default: mention, scopes: {} }
   gate: { debounce: 5s, judgeContext: 10 }
 
 persona:
+  # 不写 name 时，启动后用机器人在飞书里的应用名称。
+  # name: 小灵
   duty: ""
 
 session: { turnIdleTimeout: 15m, botChainLimit: 3 }
 agents:
   front:
     runtime: codex
-    model: gpt-5.4-mini
-    light: { model: gpt-5.4-nano }
+    model: gpt-6.1-sol
+    light: { model: gpt-6-luna }
     sandbox: read-only
     instructions: 简洁、直接，只说你能核对的事实。
   back:
     runtime: codex
-    model: gpt-5.4
+    model: gpt-6.1-sol
     effort: high
     sandbox: workspace-write
     approvalPolicy: on-request

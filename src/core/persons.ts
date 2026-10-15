@@ -51,38 +51,16 @@ export class PersonDirectory {
 
   async observe(actor: Actor, at: string): Promise<Person> {
     return this.commit(() => {
-      let person = this.persons.find((item) => item.identities.includes(actor.stableId));
-      if (!person) {
-        person = {
-          personId: actor.stableId,
-          identities: [actor.stableId],
-          names: actor.name ? [actor.name] : [],
-          refs: actor.ref ? [actor.ref] : [],
-          lastSeenAt: at,
-        };
-        this.persons.push(person);
-        return person;
-      }
-      this.note(person, actor.name, actor.ref, at);
+      const person = this.upsert(actor.stableId, actor.name, actor.ref, at);
+      this.addAliases(person, actor.aliases);
       return person;
     });
   }
 
-  async observeName(entry: { stableId: string; ref: string; name: string }, at: string): Promise<Person> {
+  async observeName(entry: { stableId: string; ref: string; name: string; aliases?: string[] }, at: string): Promise<Person> {
     return this.commit(() => {
-      let person = this.persons.find((item) => item.identities.includes(entry.stableId));
-      if (!person) {
-        person = {
-          personId: entry.stableId,
-          identities: [entry.stableId],
-          names: entry.name ? [entry.name] : [],
-          refs: entry.ref ? [entry.ref] : [],
-          lastSeenAt: at,
-        };
-        this.persons.push(person);
-        return person;
-      }
-      this.note(person, entry.name, entry.ref, at);
+      const person = this.upsert(entry.stableId, entry.name, entry.ref, at);
+      this.addAliases(person, entry.aliases);
       return person;
     });
   }
@@ -111,6 +89,31 @@ export class PersonDirectory {
     const needle = query.trim().toLowerCase();
     if (!needle) return [];
     return this.persons.filter((person) => person.names.some((name) => name.toLowerCase().includes(needle)));
+  }
+
+  private upsert(stableId: string, name: string, ref: string, at: string): Person {
+    let person = this.persons.find((item) => item.identities.includes(stableId));
+    if (!person) {
+      person = {
+        personId: stableId,
+        identities: [stableId],
+        names: name ? [name] : [],
+        refs: ref ? [ref] : [],
+        lastSeenAt: at,
+      };
+      this.persons.push(person);
+      return person;
+    }
+    this.note(person, name, ref, at);
+    return person;
+  }
+
+  /** Extra identities only. Never promoted ahead of the open_id ref. */
+  private addAliases(person: Person, aliases?: string[]): void {
+    for (const alias of aliases ?? []) {
+      if (!alias || alias === person.personId || person.identities.includes(alias)) continue;
+      person.identities.push(alias);
+    }
   }
 
   private note(person: Person, name: string, ref: string, at: string): void {

@@ -284,11 +284,12 @@ export class CodexRuntime implements RuntimeAdapter {
   }
 }
 
+/** app-server thread config expects kebab-case sandbox variants. */
 export function mapSandbox(value?: string): string | undefined {
   if (!value) return undefined;
-  if (value === "read-only") return "readOnly";
-  if (value === "workspace-write") return "workspaceWrite";
-  if (value === "danger-full-access") return "dangerFullAccess";
+  if (value === "read-only" || value === "readOnly") return "read-only";
+  if (value === "workspace-write" || value === "workspaceWrite") return "workspace-write";
+  if (value === "danger-full-access" || value === "dangerFullAccess") return "danger-full-access";
   return value;
 }
 

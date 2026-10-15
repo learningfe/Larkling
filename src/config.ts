@@ -104,6 +104,8 @@ export const configFileSchema = z
             group: z.number().int().positive().default(20),
             topic: z.number().int().positive().default(20),
             maxTokens: z.number().int().positive().default(4000),
+            /** Drop messages older than this from the recent window. */
+            maxAge: duration.default("24h"),
           })
           .default({}),
         respondTo: z
@@ -122,6 +124,8 @@ export const configFileSchema = z
       .default({}),
     persona: z
       .object({
+        /** Display name. Empty means the process fills it from the Feishu app name. */
+        name: z.string().optional(),
         soul: z.string().optional(),
         local: z.string().optional(),
         duty: z.string().default(""),
@@ -210,11 +214,11 @@ export interface LarklingConfig {
   owner: string;
   trust: { trusted: string[]; allowed: string[]; groups: string[] };
   im: {
-    window: { group: number; topic: number; maxTokens: number };
+    window: { group: number; topic: number; maxTokens: number; maxAgeMs: number };
     respondTo: { default: "mention" | "relevant"; scopes: Record<string, "mention" | "relevant"> };
     gate: { debounceMs: number; judgeContext: number };
   };
-  persona: { text: string; duty: string };
+  persona: { name: string; text: string; duty: string };
   session: { turnIdleTimeoutMs: number; botChainLimit: number };
   agents: { front: AgentConfig; back: AgentConfig };
   tasks: { enabled: boolean; taskIdleTimeoutMs: number; heartbeat: { enabled: boolean; scanIntervalMs: number; intervalMs: number } };
@@ -305,14 +309,19 @@ export async function resolveConfig(
     owner: parsed.owner,
     trust: parsed.trust,
     im: {
-      window: parsed.im.window,
+      window: {
+        group: parsed.im.window.group,
+        topic: parsed.im.window.topic,
+        maxTokens: parsed.im.window.maxTokens,
+        maxAgeMs: parseDuration(parsed.im.window.maxAge, "im.window.maxAge"),
+      },
       respondTo: parsed.im.respondTo,
       gate: {
         debounceMs: parseDuration(parsed.im.gate.debounce, "im.gate.debounce"),
         judgeContext: parsed.im.gate.judgeContext,
       },
     },
-    persona: { text: persona || "a personal assistant", duty: parsed.persona.duty },
+    persona: { name: parsed.persona.name?.trim() ?? "", text: persona || "a personal assistant", duty: parsed.persona.duty },
     session: {
       turnIdleTimeoutMs: parseDuration(parsed.session.turnIdleTimeout, "session.turnIdleTimeout"),
       botChainLimit: parsed.session.botChainLimit,

@@ -86,6 +86,24 @@ describe("gate", () => {
     const mention = message({ text: "d", scope, messageId: "4", mentionsSelf: true });
     expect(gate.accept(mention, "allowed")).toEqual([mention]);
   });
+
+  it("judges a topic the bot has replied in unless that scope is configured", async () => {
+    const config = await testConfig(await tempDir(), (draft) => {
+      draft.im.respondTo.default = "mention";
+    });
+    const clock = new ManualClock(1_000);
+    const gate = new Gate(config, true, clock, () => ["omt_joined"]);
+    const joined = { channel: "memory", kind: "topic" as const, id: "omt_joined", parentId: "oc_family" };
+    const other = { channel: "memory", kind: "topic" as const, id: "omt_other", parentId: "oc_family" };
+    expect(gate.modeFor(joined)).toBe("relevant");
+    expect(gate.modeFor(other)).toBe("mention");
+    const quiet = message({ text: "later", scope: joined, messageId: "q1", mentionsSelf: false });
+    expect(gate.accept(quiet, "allowed")).toBe("buffered");
+    config.im.respondTo.scopes.omt_joined = "mention";
+    expect(gate.modeFor(joined)).toBe("mention");
+    const skipped = message({ text: "nope", scope: joined, messageId: "q2", mentionsSelf: false });
+    expect(gate.accept(skipped, "allowed")).toBe("dropped");
+  });
 });
 
 describe("persons", () => {
@@ -101,6 +119,13 @@ describe("persons", () => {
     expect(merged.identities).toContain("other");
     expect(people.byStableId("other")?.personId).toBe(actor.stableId);
     expect(people.findByName("bob")).toHaveLength(1);
+    const named = await people.observe(
+      { channel: "feishu", ref: "ou_real", stableId: "feishu:ou_real", name: "陈", isBot: false, aliases: ["feishu-union:on_real"] },
+      "2026-02-04T00:00:00.000Z",
+    );
+    expect(named.refs[0]).toBe("ou_real");
+    expect(named.identities).toContain("feishu-union:on_real");
+    expect(people.byStableId("feishu-union:on_real")?.personId).toBe("feishu:ou_real");
   });
 });
 
@@ -110,8 +135,18 @@ describe("window and envelope", () => {
     const messages = [root, record("m1", "a", "2026-03-02T00:00:00.000Z"), record("m2", "bbbbbbbb", "2026-03-03T00:00:00.000Z"), record("m3", "c", "2026-03-04T00:00:00.000Z")];
     const selected = selectWindow(messages, { limit: 2, maxTokens: 100, root });
     expect(selected.map((item) => item.messageId)).toEqual(["root", "m2", "m3"]);
-    expect(unreadCount(messages, ["m3"], "m1")).toBe(1);
-    expect(unreadCount(messages, ["m3"], undefined)).toBe(0);
+    expect(unreadCount(messages, ["m3"], (item) => item.messageId === "m1")).toBe(1);
+    expect(unreadCount(messages, ["m3"], () => false)).toBe(0);
+    const aged = selectWindow(messages, { limit: 10, maxTokens: 4000, root, maxAgeMs: 60_000, now: Date.parse("2026-03-04T00:00:00.000Z") });
+    expect(aged.map((item) => item.messageId)).toEqual(["m3"]);
+    const undated = record("bad", "x", "not-a-date");
+    const kept = selectWindow([root, undated, record("m3", "c", "2026-03-04T00:00:00.000Z")], {
+      limit: 10,
+      maxTokens: 4000,
+      maxAgeMs: 60_000,
+      now: Date.parse("2026-03-04T00:00:00.000Z"),
+    });
+    expect(kept.map((item) => item.messageId)).toEqual(["m3", "bad"]);
   });
 
   it("renders self as 我 and includes the year outside the current year", () => {

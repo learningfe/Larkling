@@ -27,10 +27,10 @@ export function isSelf(record: ImRecord, botRef?: string, botStableId?: string):
   return false;
 }
 
-export function unreadLine(records: ImRecord[], triggeringIds: string[], lastBotMessageId?: string): string | undefined {
-  const count = unreadCount(records, triggeringIds, lastBotMessageId);
+export function unreadLine(records: ImRecord[], triggeringIds: string[], isBot: (record: ImRecord) => boolean): string | undefined {
+  const count = unreadCount(records, triggeringIds, isBot);
   if (count <= 0) return undefined;
-  return `Since you last spoke, ${count} new messages arrived here. Use \`larkling im history\` if you need them.`;
+  return `Since you last spoke, ${count} new messages arrived here.`;
 }
 
 export function conversationContext(options: {

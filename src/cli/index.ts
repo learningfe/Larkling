@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 import { homedir } from "node:os";
+import { join } from "node:path";
 import { configJsonSchema, defaultConfigPath, loadConfig, type LarklingConfig } from "../config.js";
-import { createHost } from "../core/host.js";
-import { FeishuChannel, loadBotOpenId } from "../channels/feishu/adapter.js";
+import { createHost, type BotIdentity } from "../core/host.js";
+import { FeishuChannel, loadBotProfile } from "../channels/feishu/adapter.js";
 import { FetchFeishuHttp } from "../channels/feishu/http.js";
 import { startFeishuSocket } from "../channels/feishu/ws.js";
 import { MemoryChannel } from "../channels/memory.js";
@@ -10,6 +11,7 @@ import { CodexRuntime } from "../runtimes/codex/adapter.js";
 import { createDshRuntime } from "../runtimes/dsh/index.js";
 import { createPiRuntime } from "../runtimes/pi/index.js";
 import { StateStore } from "../core/state.js";
+import { Logger } from "../log.js";
 import type { RuntimeAdapter } from "../protocol/types.js";
 
 const args = process.argv.slice(2);
@@ -56,13 +58,13 @@ function usage(): string {
 }
 
 async function start(configPath?: string): Promise<void> {
-  const config = await loadConfig(configPath ?? defaultConfigPath());
-  const channel = await buildChannel(config);
-  const runtimes = buildRuntimes(config);
-  const host = await createHost({ config, channel, runtimes, timers: true });
+  const loaded = await loadConfig(configPath ?? defaultConfigPath());
+  const opened = await openChannel(loaded);
+  const runtimes = buildRuntimes(opened.config);
+  const host = await createHost({ config: opened.config, channel: opened.channel, runtimes, timers: true, bot: opened.bot });
   await host.start();
-  if (config.channel.kind === "feishu" && channel instanceof FeishuChannel) {
-    await startFeishuSocket({ appId: config.channel.appId, appSecret: config.channel.appSecret, channel });
+  if (opened.config.channel.kind === "feishu" && opened.channel instanceof FeishuChannel) {
+    await startFeishuSocket({ appId: opened.config.channel.appId, appSecret: opened.config.channel.appSecret, channel: opened.channel });
   }
   process.stdout.write(`larkling listening ${host.apiUrl}\n`);
   await new Promise<void>((resolvePromise) => {
@@ -121,8 +123,8 @@ async function doctor(configPath?: string): Promise<void> {
   }
   if (!config.persona.text.trim()) lines.push("persona: empty");
   try {
-    const channel = await buildChannel(config);
-    const health = await channel.health();
+    const opened = await openChannel(config);
+    const health = await opened.channel.health();
     for (const item of health) lines.push(`${item.name}: ${item.ok ? "ok" : "fail"}${item.detail ? ` ${item.detail}` : ""}`);
   } catch (error) {
     lines.push(`channel: fail ${error instanceof Error ? error.message : error}`);
@@ -234,19 +236,40 @@ async function imCommand(op: string | undefined): Promise<void> {
   }
 }
 
-async function buildChannel(config: LarklingConfig) {
-  if (config.channel.kind === "memory") return new MemoryChannel(config.channel.readGroupMessages);
+async function openChannel(config: LarklingConfig): Promise<{ config: LarklingConfig; channel: MemoryChannel | FeishuChannel; bot?: BotIdentity }> {
+  if (config.channel.kind === "memory") {
+    const name = config.persona.name || "assistant";
+    return { config: { ...config, persona: { ...config.persona, name } }, channel: new MemoryChannel(config.channel.readGroupMessages) };
+  }
   const http = new FetchFeishuHttp({ appId: config.channel.appId, appSecret: config.channel.appSecret, domain: config.channel.domain });
-  const botOpenId = config.channel.botOpenId ?? (await loadBotOpenId(http)) ?? "";
-  return new FeishuChannel({
+  const log = new Logger(join(config.stateDir, "log.jsonl"), "info");
+  let profile: { openId?: string; appName?: string } = {};
+  try {
+    profile = await loadBotProfile(http);
+  } catch (error) {
+    log.warn("bot.profile_failed", { error: error instanceof Error ? error.message : String(error) });
+  }
+  const botOpenId = config.channel.botOpenId || profile.openId || "";
+  if (!botOpenId) log.warn("bot.open_id_unresolved", { detail: "group @mentions will be ignored until bot open_id is known" });
+  const name = config.persona.name || profile.appName || "assistant";
+  const next: LarklingConfig = {
+    ...config,
+    persona: { ...config.persona, name },
+    channel: { ...config.channel, botOpenId: botOpenId || undefined },
+  };
+  const channel = new FeishuChannel({
     http,
     botOpenId,
+    botName: name,
     readGroupMessages: config.channel.readGroupMessages,
     stateDir: config.stateDir,
     timeZone: config.timezone,
     ratePerSecond: config.channel.ratePerSecond,
     speechPerSecond: config.channel.speechRatePerSecond,
+    log,
   });
+  const bot = botOpenId ? { ref: botOpenId, stableId: `feishu:${botOpenId}`, name } : undefined;
+  return { config: next, channel, bot };
 }
 
 function buildRuntimes(config: LarklingConfig): Map<string, RuntimeAdapter> {
