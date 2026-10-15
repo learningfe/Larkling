@@ -260,6 +260,32 @@ describe("codex app-server adapter", () => {
     }
   });
 
+  it("requests the priority service tier only when fast is set", async () => {
+    const transport = new MemoryCodexTransport();
+    const stop = drive(transport);
+    const runtime = new CodexRuntime({ transport });
+    const events: RuntimeEvent[] = [];
+    const reading = (async () => {
+      for await (const event of runtime.events()) events.push(event);
+    })();
+    const fast = await runtime.open(spec({ sessionId: "s-fast", profile: { ...spec().profile, fast: true } }));
+    await runtime.start(fast, input("fast"));
+    const plain = await runtime.open(spec({ sessionId: "s-plain" }));
+    await runtime.start(plain, input("plain"));
+    const starts = transport.sent.filter((item) => (item as { method?: string }).method === "turn/start") as {
+      params: { serviceTier?: string; threadId?: string };
+    }[];
+    expect(starts[0]?.params.serviceTier).toBe("priority");
+    expect(starts[1]?.params).not.toHaveProperty("serviceTier");
+    const opened = transport.sent.filter((item) => (item as { method?: string }).method === "thread/start") as {
+      params: { serviceTier?: string };
+    }[];
+    expect(opened.every((item) => item.params.serviceTier === undefined)).toBe(true);
+    runtime.close();
+    await reading;
+    stop();
+  });
+
   it("resumes a restarted idle thread when tick runs between resume and turn start", async () => {
     const dir = await tempDir();
     const config = await testConfig(dir, (draft) => {

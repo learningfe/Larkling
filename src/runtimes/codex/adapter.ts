@@ -324,12 +324,15 @@ function threadConfig(profile: RuntimeProfile): Record<string, unknown> {
 }
 
 function turnConfig(profile: RuntimeProfile): Record<string, unknown> {
-  return {
+  const config: Record<string, unknown> = {
     model: profile.model,
     effort: profile.effort,
     approvalPolicy: profile.approvalPolicy,
     sandbox: mapSandbox(profile.sandbox),
   };
+  // Config calls this `fast`. The app-server field is serviceTier.
+  if (profile.fast) config.serviceTier = "priority";
+  return config;
 }
 
 export function toCodexInput(input: TurnInput, seed?: string): unknown[] {

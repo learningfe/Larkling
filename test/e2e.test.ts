@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { conversationSessionId } from "../src/protocol/types.js";
-import { groupScope, message, ownerActor, OWNER_ID, pushAndSettle, startHarness, waitFor, type Harness } from "./helpers.js";
+import { groupScope, message, ownerActor, OWNER_ID, post, pushAndSettle, startHarness, waitFor, type Harness } from "./helpers.js";
 
 function conversation(h: Harness, id = "ou_owner") {
   return h.host.snapshot().sessions[conversationSessionId({ channel: "memory", kind: "dm", id })];
@@ -334,5 +334,48 @@ describe("in-memory channel and scripted runtime", () => {
     const before = h.runtime.opens.filter((item) => item.kind === "judge").length;
     await pushAndSettle(h, message({ text: "@bot now", messageId: "g2", scope, actor: human, mentionsSelf: true }));
     expect(h.runtime.opens.filter((item) => item.kind === "judge").length).toBe(before);
+  });
+
+  it("passes fast through the front, back, and light profiles", async () => {
+    const h = await startHarness((config) => {
+      config.agents.front.fast = true;
+      config.agents.front.model = "main-model";
+      config.agents.front.lightModel = "light-model";
+      config.agents.back.fast = true;
+      config.agents.back.model = "back-model";
+      config.im.gate.debounceMs = 1_000;
+      config.trust.groups = ["oc_family"];
+    });
+    h.runtime.handler = async (turn) => {
+      turn.emit({ type: "turn.completed", text: turn.spec.kind === "judge" ? "RESPOND" : "ok" });
+    };
+    await pushAndSettle(h, message({ text: "hi", messageId: "f1" }));
+    expect(h.runtime.opens.find((item) => item.kind === "conversation")?.profile).toMatchObject({
+      model: "main-model",
+      fast: true,
+    });
+    const parent = conversation(h);
+    const started = await post(h.host.apiUrl, parent.token, "/v1/task/start", { body: "work", followUpEnabled: false });
+    expect(started.status).toBe(200);
+    await h.host.settle();
+    expect(h.runtime.opens.find((item) => item.kind === "task")?.profile).toMatchObject({
+      model: "back-model",
+      fast: true,
+    });
+    const scope = { channel: "memory", kind: "topic" as const, id: "omt_fast", parentId: "oc_family" };
+    const human = { channel: "memory", ref: "ou_s", stableId: "feishu:on_stranger", name: "Sam", isBot: false };
+    await pushAndSettle(h, message({ text: "@bot", messageId: "f2", scope, actor: human, mentionsSelf: true }));
+    h.channel.push(message({ text: "later", messageId: "f3", scope, actor: human, mentionsSelf: false }));
+    await waitFor(() => h.host.snapshot().seenMessageIds.includes("f3"), "seen later");
+    await h.host.settle();
+    h.clock.advance(1_000);
+    await h.host.flushGate();
+    await h.host.settle();
+    expect(h.runtime.opens.find((item) => item.kind === "judge")?.profile).toMatchObject({
+      model: "light-model",
+      fast: true,
+      sandbox: "read-only",
+      approvalPolicy: "never",
+    });
   });
 });

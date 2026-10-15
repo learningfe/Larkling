@@ -141,6 +141,8 @@ export interface RuntimeProfile {
   sandbox?: string;
   approvalPolicy?: string;
   cwd?: string;
+  /** When true, the runtime should prefer a faster service tier. */
+  fast?: boolean;
   extra?: Record<string, unknown>;
 }
 

@@ -17,7 +17,7 @@ src/cli/          larkling 命令
 
 配置默认读 `LARKLING_CONFIG`，否则是 `~/.larkling/config.yaml`。状态目录默认 `~/.larkling/state`，可用 `LARKLING_STATE_DIR` 覆盖。飞书密钥用 `LARKLING_APP_SECRET`（配置里写 `env:LARKLING_APP_SECRET`）。任务 API 只监听 `127.0.0.1`，地址写在状态目录的 `api.url`，所有者令牌写在 `owner.token`（权限 0600）。示例见 `examples/config.yaml`。
 
-`owner` 写成 `feishu:` 加上你的 `open_id`（`ou_` 开头）。`union_id` 只作为附加身份保存，不是主键。`persona.name` 不写时，启动后用飞书应用名称（`/open-apis/bot/v3/info` 的 `app_name`）。群和话题的近期窗口除了条数和 token，还按 `im.window.maxAge` 丢掉更早的消息，默认 24 小时。机器人已经回复过的话题里，之后没 @ 的消息会走相关性判断；某个 scope 在 `respondTo.scopes` 里写了规则时，以配置为准。要停掉后台任务，直接用自然语言说，前台会取消对应任务；对得上不止一个时，会先列出来问你。
+`owner` 写成 `feishu:` 加上你的 `open_id`（`ou_` 开头）。`union_id` 只作为附加身份保存，不是主键。`persona.name` 不写时，启动后用飞书应用名称（`/open-apis/bot/v3/info` 的 `app_name`）。群和话题的近期窗口除了条数和 token，还按 `im.window.maxAge` 丢掉更早的消息，默认 24 小时。机器人已经回复过的话题里，之后没 @ 的消息会走相关性判断；某个 scope 在 `respondTo.scopes` 里写了规则时，以配置为准。要停掉后台任务，直接用自然语言说，前台会取消对应任务；对得上不止一个时，会先列出来问你。`agents.front` 和 `agents.back` 都可以写 `fast: true`（默认 `false`）。打开后这一侧的回合走更快的服务档位；检查、相关性判断和压缩用的轻量配置也沿用同一个开关。
 
 ## 命令
 

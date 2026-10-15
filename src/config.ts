@@ -18,6 +18,8 @@ const agentSchema = z
     cwd: z.string().optional(),
     effort: z.string().optional(),
     approvalPolicy: z.string().optional(),
+    /** Prefer a faster service tier for this agent's turns. Default false. */
+    fast: z.boolean().default(false),
   })
   .passthrough();
 
@@ -186,6 +188,8 @@ export interface AgentConfig {
   cwd?: string;
   effort?: string;
   approvalPolicy?: string;
+  /** Prefer a faster service tier. Applies to the light profile as well. */
+  fast: boolean;
   extra: Record<string, unknown>;
 }
 
@@ -250,7 +254,7 @@ export async function resolveConfig(
   const parsed = configFileSchema.parse(input);
   const baseDir = sourcePath ? resolve(sourcePath, "..") : process.cwd();
   const agent = async (value: z.infer<typeof agentSchema>): Promise<AgentConfig> => {
-    const { runtime, model, light, instructions, sandbox, cwd, effort, approvalPolicy, ...extra } = value;
+    const { runtime, model, light, instructions, sandbox, cwd, effort, approvalPolicy, fast, ...extra } = value;
     return {
       runtime,
       model,
@@ -260,6 +264,7 @@ export async function resolveConfig(
       cwd: cwd ? expandHome(cwd, home) : undefined,
       effort,
       approvalPolicy,
+      fast,
       extra,
     };
   };

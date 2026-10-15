@@ -1621,6 +1621,8 @@ export class Host {
       sandbox: light ? "read-only" : agent.sandbox,
       approvalPolicy: light ? "never" : agent.approvalPolicy,
       cwd: agent.cwd,
+      // Check, judge, and compact use the light profile and keep the same fast flag.
+      fast: agent.fast,
       extra: light ? {} : agent.extra,
     };
   }
