@@ -1,5 +1,5 @@
 import { copyFile, mkdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import type { LarklingConfig } from "../config.js";
 import { runtimeLimits } from "../config.js";
 import type {
@@ -89,6 +89,8 @@ export class Host {
   readonly log: Logger;
   apiUrl = "";
   ownerToken = "";
+  /** How agents invoke this CLI: the node binary plus the absolute script path. */
+  cli: string[] = [process.execPath, resolve(process.argv[1] ?? "larkling")];
 
   private readonly runtimes: Map<string, RuntimeAdapter>;
   private readonly lock = new KeyedLock();
@@ -150,6 +152,7 @@ export class Host {
     this.apiUrl = api.url;
     this.apiClose = api.close;
     await writeFile(join(this.config.stateDir, "api.url"), api.url, { mode: 0o600 });
+    await mkdir(this.frontDir(), { recursive: true });
     this.ownerToken = await this.ensureOwnerToken();
     this.loops = [this.consumeChannel(), ...[...this.runtimes.values()].map((runtime) => this.consumeRuntime(runtime))];
     await this.redeliverPending();
@@ -1152,7 +1155,7 @@ export class Host {
       return {
         input: {
           turnId: "",
-          context: taskContext({ body: task?.body || prompt, apiUrl: this.apiUrl, token, parentContainer: session.imContainer }),
+          context: taskContext({ body: task?.body || prompt, apiUrl: this.apiUrl, token, parentContainer: session.imContainer, cli: this.cli }),
           messages: [{ text: prompt }],
         },
       };
@@ -1176,6 +1179,7 @@ export class Host {
       });
     }
     for (const record of window) this.noteVisible(sessionId, record);
+    const windowIds = window.map((record) => record.messageId);
     const unread = unreadLine(window, messages.map((message) => message.messageId), (record) => isSelf(record, this.bot.ref, this.bot.stableId));
     const tasks = Object.values(this.stateStore.get().tasks).filter((task) => task.parentSessionId === sessionId);
     const context = scope
@@ -1201,13 +1205,20 @@ export class Host {
           apiUrl: this.apiUrl,
           token,
           sessionId,
+          cli: this.cli,
         })
       : "";
+    const renderedIds = new Set(scope ? windowIds : []);
     const inputMessages: InputMessage[] = [];
     for (const item of batch) {
       if (item.kind === "message") {
         const images = session.kind === "conversation" ? await this.downloadImages(item.attachments) : [];
-        inputMessages.push({ text: item.text, messageId: item.messageId, images: images.length ? images : undefined });
+        inputMessages.push({
+          text: item.text,
+          messageId: item.messageId,
+          images: images.length ? images : undefined,
+          inContext: renderedIds.has(item.messageId) || undefined,
+        });
       } else if (item.kind === "task_event") inputMessages.push({ text: item.text });
       else inputMessages.push({ text: item.text });
     }
@@ -1620,11 +1631,17 @@ export class Host {
       effort: light ? undefined : agent.effort,
       sandbox: light ? "read-only" : agent.sandbox,
       approvalPolicy: light ? "never" : agent.approvalPolicy,
-      cwd: agent.cwd,
+      // The front agent defaults to an empty work dir so it does not browse the install.
+      cwd: agent.cwd ?? (kind === "task" ? undefined : this.frontDir()),
       // Check, judge, and compact use the light profile and keep the same fast flag.
       fast: agent.fast,
+      network: light ? false : agent.network,
       extra: light ? {} : agent.extra,
     };
+  }
+
+  private frontDir(): string {
+    return join(this.config.stateDir, "front");
   }
 
   private runtimeFor(session: SessionRecord): RuntimeAdapter {

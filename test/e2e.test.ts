@@ -18,7 +18,12 @@ describe("in-memory channel and scripted runtime", () => {
     expect(conversation(h).phase).toBe("idle");
     expect(h.runtime.opens[0].instructions).toContain("front instructions");
     expect(h.runtime.opens[0].instructions).toContain("Your name is Larkling");
+    expect(h.runtime.opens[0].profile.network).toBe(false);
+    expect(h.runtime.opens[0].profile.cwd).toMatch(/\/front$/);
     expect(h.runtime.starts[0].input.context).toContain("Token:");
+    expect(h.runtime.starts[0].input.context).toContain("hello");
+    expect(h.runtime.starts[0].input.messages[0].inContext).toBe(true);
+    expect(h.runtime.starts[0].input.context).toMatch(/Cancel a task: \S+ \S+ task cancel --api http\S+ --token \S+ --task <taskId>/);
     await pushAndSettle(h, message({ text: "quiet", messageId: "m2" }));
     expect(h.channel.sent).toHaveLength(1);
   });
@@ -339,9 +344,11 @@ describe("in-memory channel and scripted runtime", () => {
   it("passes fast through the front, back, and light profiles", async () => {
     const h = await startHarness((config) => {
       config.agents.front.fast = true;
+      config.agents.front.network = true;
       config.agents.front.model = "main-model";
       config.agents.front.lightModel = "light-model";
       config.agents.back.fast = true;
+      config.agents.back.network = true;
       config.agents.back.model = "back-model";
       config.im.gate.debounceMs = 1_000;
       config.trust.groups = ["oc_family"];
@@ -353,7 +360,9 @@ describe("in-memory channel and scripted runtime", () => {
     expect(h.runtime.opens.find((item) => item.kind === "conversation")?.profile).toMatchObject({
       model: "main-model",
       fast: true,
+      network: true,
     });
+    expect(h.runtime.opens.find((item) => item.kind === "conversation")?.profile.cwd).toMatch(/\/front$/);
     const parent = conversation(h);
     const started = await post(h.host.apiUrl, parent.token, "/v1/task/start", { body: "work", followUpEnabled: false });
     expect(started.status).toBe(200);
@@ -361,6 +370,7 @@ describe("in-memory channel and scripted runtime", () => {
     expect(h.runtime.opens.find((item) => item.kind === "task")?.profile).toMatchObject({
       model: "back-model",
       fast: true,
+      network: true,
     });
     const scope = { channel: "memory", kind: "topic" as const, id: "omt_fast", parentId: "oc_family" };
     const human = { channel: "memory", ref: "ou_s", stableId: "feishu:on_stranger", name: "Sam", isBot: false };
@@ -374,6 +384,7 @@ describe("in-memory channel and scripted runtime", () => {
     expect(h.runtime.opens.find((item) => item.kind === "judge")?.profile).toMatchObject({
       model: "light-model",
       fast: true,
+      network: false,
       sandbox: "read-only",
       approvalPolicy: "never",
     });

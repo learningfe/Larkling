@@ -20,6 +20,8 @@ const agentSchema = z
     approvalPolicy: z.string().optional(),
     /** Prefer a faster service tier for this agent's turns. Default false. */
     fast: z.boolean().default(false),
+    /** Let the agent's sandboxed commands reach the network. Default false. */
+    network: z.boolean().default(false),
   })
   .passthrough();
 
@@ -190,6 +192,8 @@ export interface AgentConfig {
   approvalPolicy?: string;
   /** Prefer a faster service tier. Applies to the light profile as well. */
   fast: boolean;
+  /** Allow network access inside the sandbox. Not applied to the light profile. */
+  network: boolean;
   extra: Record<string, unknown>;
 }
 
@@ -254,7 +258,7 @@ export async function resolveConfig(
   const parsed = configFileSchema.parse(input);
   const baseDir = sourcePath ? resolve(sourcePath, "..") : process.cwd();
   const agent = async (value: z.infer<typeof agentSchema>): Promise<AgentConfig> => {
-    const { runtime, model, light, instructions, sandbox, cwd, effort, approvalPolicy, fast, ...extra } = value;
+    const { runtime, model, light, instructions, sandbox, cwd, effort, approvalPolicy, fast, network, ...extra } = value;
     return {
       runtime,
       model,
@@ -265,6 +269,7 @@ export async function resolveConfig(
       effort,
       approvalPolicy,
       fast,
+      network,
       extra,
     };
   };

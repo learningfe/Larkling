@@ -39,6 +39,8 @@ describe("config", () => {
     expect(loaded.im.window.maxAgeMs).toBe(24 * 3_600_000);
     expect(loaded.agents.front.fast).toBe(false);
     expect(loaded.agents.back.fast).toBe(false);
+    expect(loaded.agents.front.network).toBe(false);
+    expect(loaded.agents.back.network).toBe(false);
   });
 
   it("reads fast on front and back without putting it in extra", async () => {
@@ -47,16 +49,18 @@ describe("config", () => {
         owner: "feishu:on_owner",
         channel: { memory: {} },
         agents: {
-          front: { runtime: "codex", fast: true, light: { model: "mini" } },
-          back: { runtime: "codex", fast: false, custom: 1 },
+          front: { runtime: "codex", fast: true, network: true, light: { model: "mini" } },
+          back: { runtime: "codex", fast: false, network: false, custom: 1 },
         },
       },
       {},
     );
     expect(loaded.agents.front.fast).toBe(true);
+    expect(loaded.agents.front.network).toBe(true);
     expect(loaded.agents.front.lightModel).toBe("mini");
     expect(loaded.agents.front.extra).toEqual({});
     expect(loaded.agents.back.fast).toBe(false);
+    expect(loaded.agents.back.network).toBe(false);
     expect(loaded.agents.back.extra).toEqual({ custom: 1 });
   });
 

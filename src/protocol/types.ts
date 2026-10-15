@@ -143,6 +143,8 @@ export interface RuntimeProfile {
   cwd?: string;
   /** When true, the runtime should prefer a faster service tier. */
   fast?: boolean;
+  /** When true, sandboxed commands may use the network. */
+  network?: boolean;
   extra?: Record<string, unknown>;
 }
 
@@ -170,6 +172,8 @@ export interface InputMessage {
   text: string;
   messageId?: string;
   images?: InputImage[];
+  /** The text already appears, with its header, in the turn context window. */
+  inContext?: boolean;
 }
 
 export interface TurnInput {

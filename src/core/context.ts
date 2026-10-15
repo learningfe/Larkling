@@ -43,6 +43,7 @@ export function conversationContext(options: {
   apiUrl: string;
   token: string;
   sessionId: string;
+  cli?: string[];
 }): string {
   const lines = [
     `Now: ${options.now}`,
@@ -51,6 +52,7 @@ export function conversationContext(options: {
     `Token: ${options.token}`,
     `Session: ${options.sessionId}`,
   ];
+  if (options.cli) lines.push(commandsBlock({ cli: options.cli, apiUrl: options.apiUrl, token: options.token, container: options.scope.id, role: "front" }));
   if (options.unread) lines.push(options.unread);
   const taskEvent = options.batch.find((item) => item.kind === "task_event");
   if (taskEvent && taskEvent.kind === "task_event") {
@@ -66,7 +68,7 @@ export function conversationContext(options: {
   return lines.join("\n\n");
 }
 
-export function taskContext(options: { body: string; apiUrl: string; token: string; parentContainer?: string }): string {
+export function taskContext(options: { body: string; apiUrl: string; token: string; parentContainer?: string; cli?: string[] }): string {
   return [
     "Task body:",
     options.body,
@@ -74,6 +76,7 @@ export function taskContext(options: { body: string; apiUrl: string; token: stri
     `Task API: ${options.apiUrl}`,
     `Token: ${options.token}`,
     options.parentContainer ? `Parent container: ${options.parentContainer}` : "",
+    options.cli ? "\n" + commandsBlock({ cli: options.cli, apiUrl: options.apiUrl, token: options.token, container: options.parentContainer, role: "back" }) : "",
   ]
     .filter(Boolean)
     .join("\n");
@@ -95,4 +98,39 @@ export function judgeContext(options: { persona: string; duty: string; root?: st
   return [`Persona: ${options.persona}`, options.duty ? `Duty: ${options.duty}` : "", options.root ? `Topic root:\n${options.root}` : "", `Recent messages:\n${options.recent}`, `Candidates:\n${options.candidates}`]
     .filter(Boolean)
     .join("\n\n");
+}
+
+/** Quote one shell word only when it needs it. */
+function shellWord(value: string): string {
+  return /^[\w@%+=:,./-]+$/.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * Ready-to-run command lines with the CLI path, API url, and session token
+ * already filled in, so the agent never has to discover them.
+ */
+export function commandsBlock(options: { cli: string[]; apiUrl: string; token: string; container?: string; role: "front" | "back" }): string {
+  const cli = options.cli.map(shellWord).join(" ");
+  const auth = `--api ${shellWord(options.apiUrl)} --token ${shellWord(options.token)}`;
+  // Subcommands are positional, so the auth flags go after them.
+  const run = (sub: string, rest: string) => `${cli} ${sub} ${auth} ${rest}`.trimEnd();
+  const container = options.container ? shellWord(options.container) : "<container>";
+  const lines =
+    options.role === "front"
+      ? [
+          `Start background work: ${run("task start", "--body '<goal / current progress / next step / recent notes>' [--follow-up]")}`,
+          `Continue a task: ${run("task continue", "--task <taskId> --message '<message>'")}`,
+          `Cancel a task: ${run("task cancel", "--task <taskId>")}`,
+          `List tasks: ${run("task list", "")}`,
+          `Read history: ${run("im history", `--container ${container} [--start <messageId>] [--end <messageId>] [--limit <n>]`)}`,
+          `Look up a name: ${run("im who", "--name '<name>'")}`,
+        ]
+      : [
+          `Update the task body: ${run("task update", "--task <taskId> --version <version> --body '<body>' [--follow-up]")}`,
+          `Get the task: ${run("task get", "--task <taskId>")}`,
+          `Read history: ${run("im history", `--container ${container} [--start <messageId>] [--end <messageId>] [--limit <n>]`)}`,
+          `Fetch a file: ${run("im file", "--message <messageId> --key <fileKey>")}`,
+          `Look up a name: ${run("im who", "--name '<name>'")}`,
+        ];
+  return `Commands (run exactly as written; replace only <...> and drop unused [...]):\n${lines.join("\n")}`;
 }

@@ -328,17 +328,30 @@ function turnConfig(profile: RuntimeProfile): Record<string, unknown> {
     model: profile.model,
     effort: profile.effort,
     approvalPolicy: profile.approvalPolicy,
-    sandbox: mapSandbox(profile.sandbox),
   };
+  // turn/start takes a sandboxPolicy object, not the thread-level sandbox mode.
+  const policy = sandboxPolicy(profile);
+  if (policy) config.sandboxPolicy = policy;
   // Config calls this `fast`. The app-server field is serviceTier.
   if (profile.fast) config.serviceTier = "priority";
   return config;
 }
 
+/** Config calls this `network`. The app-server field is sandboxPolicy.networkAccess. */
+export function sandboxPolicy(profile: RuntimeProfile): Record<string, unknown> | undefined {
+  const mode = mapSandbox(profile.sandbox);
+  const networkAccess = profile.network === true;
+  if (mode === "read-only") return { type: "readOnly", networkAccess };
+  if (mode === "workspace-write") return { type: "workspaceWrite", networkAccess };
+  if (mode === "danger-full-access") return { type: "dangerFullAccess" };
+  return undefined;
+}
+
 export function toCodexInput(input: TurnInput, seed?: string): unknown[] {
   const items: unknown[] = [];
   if (seed?.trim()) items.push({ type: "text", text: `${SEED_PREFACE}\n${seed.trim()}` });
-  const text = [input.context, ...input.messages.map((message) => message.text)].filter(Boolean).join("\n\n");
+  // Messages already rendered in the context window are not repeated.
+  const text = [input.context, ...input.messages.map((message) => (message.inContext ? "" : message.text))].filter(Boolean).join("\n\n");
   if (text) items.push({ type: "text", text });
   for (const message of input.messages) {
     for (const image of message.images ?? []) items.push({ type: "localImage", path: image.path });

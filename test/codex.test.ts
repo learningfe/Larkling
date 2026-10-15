@@ -260,6 +260,43 @@ describe("codex app-server adapter", () => {
     }
   });
 
+  it("maps network to sandboxPolicy.networkAccess on turn/start", async () => {
+    const transport = new MemoryCodexTransport();
+    const stop = drive(transport);
+    const runtime = new CodexRuntime({ transport });
+    const reading = (async () => {
+      for await (const _event of runtime.events()) void _event;
+    })();
+    const open = await runtime.open(spec({ sessionId: "s-net", profile: { ...spec().profile, network: true } }));
+    await runtime.start(open, input("net"));
+    const closed = await runtime.open(spec({ sessionId: "s-closed" }));
+    await runtime.start(closed, input("closed"));
+    const writer = await runtime.open(spec({ sessionId: "s-write", profile: { ...spec().profile, sandbox: "workspace-write", network: true } }));
+    await runtime.start(writer, input("write"));
+    const starts = transport.sent.filter((item) => (item as { method?: string }).method === "turn/start") as {
+      params: { sandboxPolicy?: unknown; sandbox?: unknown };
+    }[];
+    expect(starts[0]?.params.sandboxPolicy).toEqual({ type: "readOnly", networkAccess: true });
+    expect(starts[1]?.params.sandboxPolicy).toEqual({ type: "readOnly", networkAccess: false });
+    expect(starts[2]?.params.sandboxPolicy).toEqual({ type: "workspaceWrite", networkAccess: true });
+    expect(starts.every((item) => item.params.sandbox === undefined)).toBe(true);
+    runtime.close();
+    await reading;
+    stop();
+  });
+
+  it("does not repeat a message whose text is already in the context window", () => {
+    const items = toCodexInput({
+      turnId: "t",
+      context: "Recent messages:\n[Chris 10-15 21:56 #om_1]\n别查了",
+      messages: [{ text: "别查了", messageId: "om_1", inContext: true }, { text: "task event text" }],
+    }) as { text?: string }[];
+    const text = items.map((item) => item.text ?? "").join("\n");
+    expect(text.match(/别查了/g)).toHaveLength(1);
+    expect(text).toContain("#om_1");
+    expect(text).toContain("task event text");
+  });
+
   it("requests the priority service tier only when fast is set", async () => {
     const transport = new MemoryCodexTransport();
     const stop = drive(transport);
