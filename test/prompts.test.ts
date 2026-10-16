@@ -14,7 +14,9 @@ describe("built-in prompts", () => {
     expect(text).toContain("Do not open with stiff wording");
     expect(text).toContain("not yet verified");
     expect(text).toContain("Do not expose how you work");
-    expect(text).toContain("`@bot` means the user mentioned you");
+    expect(text).toContain("Who was really @-mentioned is given by `mentions`");
+    expect(text).toContain('<at user_id="ou_xxx">Name</at>');
+    expect(text).not.toContain("@bot");
     expect(text).toContain("Never claim to have done an action you did not actually perform");
     expect(text).not.toContain("I created a task");
     expect(text).not.toContain("/stop");

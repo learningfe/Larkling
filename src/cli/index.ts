@@ -260,6 +260,7 @@ async function openChannel(config: LarklingConfig): Promise<{ config: LarklingCo
   const channel = new FeishuChannel({
     http,
     botOpenId,
+    appId: config.channel.appId,
     botName: name,
     readGroupMessages: config.channel.readGroupMessages,
     stateDir: config.stateDir,

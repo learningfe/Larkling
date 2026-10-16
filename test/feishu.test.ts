@@ -2,7 +2,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { FeishuChannel, feishuMessageBody, loadBotProfile } from "../src/channels/feishu/adapter.js";
+import { FeishuChannel, feishuMessageBody, loadBotProfile, sanitizeAtTags } from "../src/channels/feishu/adapter.js";
 import { speechFileId, transcribeAudio, withTempPcm } from "../src/channels/feishu/audio.js";
 import { feishuUuid } from "../src/channels/feishu/card.js";
 import { normalizeFeishuMessage, type FeishuRawMessage, type NormalizeContext } from "../src/channels/feishu/content.js";
@@ -48,15 +48,15 @@ describe("feishu message normalization", () => {
         msg_type: "text",
         content: JSON.stringify({ text: "hi @_user_1 @_all" }),
         mentions: [
-          { key: "@_user_1", id: { open_id: "ou_bot", union_id: "on_bot" }, name: "Bot" },
+          { key: "@_user_1", id: { open_id: "ou_bot" }, name: "Bot" },
           { key: "@_all", id: { open_id: "all" }, name: "all" },
         ],
       }),
     );
-    expect(text.text).toBe("hi @bot @所有人");
+    expect(text.text).toBe('hi <at user_id="ou_bot">Bot</at> <at user_id="all"></at>');
     expect(text.mentionsSelf).toBe(true);
     expect(text.mentionsOthers).toBe(true);
-    expect(text.names).toEqual([{ stableId: "feishu:ou_bot", ref: "ou_bot", name: "Bot", aliases: ["feishu-union:on_bot"] }]);
+    expect(text.names).toEqual([{ stableId: "feishu:ou_bot", ref: "ou_bot", name: "Bot" }]);
 
     const post = await normalize(
       raw({
@@ -66,7 +66,7 @@ describe("feishu message normalization", () => {
     );
     expect(post.text).toContain("**标题**");
     expect(post.text).not.toContain("@我");
-    expect(post.text).toContain("@bot");
+    expect(post.text).toContain('<at user_id="ou_bot">');
     expect(post.mentionsSelf).toBe(true);
 
     const image = await normalize(raw({ msg_type: "image", content: { image_key: "img_1" } }));
@@ -185,14 +185,14 @@ describe("feishu adapter", () => {
     const payload = {
       header: { event_id: "e1", event_type: "im.message.receive_v1" },
       event: {
-        sender: { sender_type: "user", sender_id: { open_id: "ou_u", union_id: "on_u" } },
+        sender: { sender_type: "user", sender_id: { open_id: "ou_u" } },
         message: {
           message_id: "om_1",
           chat_id: "oc_1",
           chat_type: "group",
           message_type: "text",
           content: JSON.stringify({ text: "@_user_1 hello" }),
-          mentions: [{ key: "@_user_1", id: { open_id: "ou_bot", union_id: "on_bot" }, name: "Bot" }],
+          mentions: [{ key: "@_user_1", id: { open_id: "ou_bot" }, name: "Bot" }],
           create_time: "1710000000000",
         },
       },
@@ -206,9 +206,10 @@ describe("feishu adapter", () => {
     expect(messages).toHaveLength(1);
     if (messages[0].type !== "message") throw new Error("expected message");
     expect(messages[0].mentionsSelf).toBe(true);
-    expect(messages[0].text).toContain("@bot");
+    expect(messages[0].text).toContain('<at user_id="ou_bot">Bot</at>');
+    expect(messages[0].mentions).toEqual([{ ref: "ou_bot", name: "Bot" }]);
     expect(messages[0].actor.stableId).toBe("feishu:ou_u");
-    expect(messages[0].actor.aliases).toEqual(["feishu-union:on_u"]);
+    expect(messages[0].actor).not.toHaveProperty("aliases");
     expect(messages[0].scope).toEqual({ channel: "feishu", kind: "group", id: "oc_1" });
     expect(events.some((event) => event.type === "names")).toBe(true);
   });
@@ -308,7 +309,7 @@ describe("feishu adapter", () => {
       await bot.ingest({
         header: { event_id: "e-audio", event_type: "im.message.receive_v1" },
         event: {
-          sender: { sender_type: "user", sender_id: { open_id: "ou_u", union_id: "on_u" } },
+          sender: { sender_type: "user", sender_id: { open_id: "ou_u" } },
           message: {
             message_id: "om_audio",
             chat_id: "oc_1",
@@ -391,17 +392,20 @@ describe("feishu adapter", () => {
     expect(await loadBotProfile(http)).toEqual({ openId: "ou_old", appName: "旧名" });
   });
 
-  it("renders the bot mention as the fixed @bot token and others with their event names", async () => {
+  it("renders real mentions with Feishu <at> tags and lists them; typed @ stays plain text", async () => {
     const mentions = [
       { key: "@_user_1", id: { open_id: "ou_bot" }, name: "SuperGrok" },
       { key: "@_user_2", id: { open_id: "ou_amy" }, name: "Amy" },
     ];
     const text = await normalize(raw({ msg_type: "text", content: { text: "@_user_1 我叫什么 @_user_2" }, mentions }));
-    expect(text.text).toBe("@bot 我叫什么 @Amy");
+    expect(text.text).toBe('<at user_id="ou_bot">SuperGrok</at> 我叫什么 <at user_id="ou_amy">Amy</at>');
+    expect(text.mentions).toEqual([{ ref: "ou_bot", name: "SuperGrok" }, { ref: "ou_amy", name: "Amy" }]);
+    const typed = await normalize(raw({ msg_type: "text", content: { text: "@_user_1 做完了@我 <at user_id=\"ou_x\">X</at>" }, mentions }));
+    expect(typed.text).toBe('<at user_id="ou_bot">SuperGrok</at> 做完了@我 <at user_id="ou_x">X</at>');
     expect(text.mentionsSelf).toBe(true);
     expect(text.mentionsOthers).toBe(true);
     const fallback = await normalize(raw({ msg_type: "text", content: { text: "@_user_1 我叫什么" }, mentions }));
-    expect(fallback.text).toBe("@bot 我叫什么");
+    expect(fallback.text).toBe('<at user_id="ou_bot">SuperGrok</at> 我叫什么');
     const post = await normalize(
       raw({
         msg_type: "post",
@@ -410,10 +414,10 @@ describe("feishu adapter", () => {
       }),
       { mentions },
     );
-    expect(post.text).toContain("@bot");
-    expect(post.text).not.toContain("SuperGrok");
+    expect(post.text).toContain('<at user_id="ou_bot">SuperGrok</at>');
     expect(post.text).not.toContain("小灵");
-    expect(post.text).toContain("@Amy");
+    expect(post.text).toContain('<at user_id="ou_amy">Amy</at>');
+    expect(post.mentions).toEqual([{ ref: "ou_bot", name: "SuperGrok" }, { ref: "ou_amy", name: "Amy" }]);
     expect(post.text).not.toContain("@我");
     expect(post.mentionsSelf).toBe(true);
   });
@@ -473,12 +477,12 @@ describe("feishu adapter", () => {
       log: { warn: (_event, fields) => warnings.push(fields ?? {}) },
     });
     const events = await collect(bot, async () => {
-      await bot.ingest(receive("ou_known", "on_known", "om_known"));
-      await bot.ingest(receive("ou_member", "on_member", "om_member"));
-      await bot.ingest(receive("ou_known", "on_known", "om_known_again"));
-      await bot.ingest(receive("ou_bot", "on_bot", "om_self", "app"));
-      await bot.ingest(receive("ou_dm", "on_dm", "om_dm", "user", "p2p"));
-      await bot.ingest(receive("ou_ghost", "on_ghost", "om_ghost"));
+      await bot.ingest(receive("ou_known", "om_known"));
+      await bot.ingest(receive("ou_member", "om_member"));
+      await bot.ingest(receive("ou_known", "om_known_again"));
+      await bot.ingest(receive("ou_bot", "om_self", "app"));
+      await bot.ingest(receive("ou_dm", "om_dm", "user", "p2p"));
+      await bot.ingest(receive("ou_ghost", "om_ghost"));
     });
     const messages = events.filter((event) => event.type === "message");
     expect(messages.map((event) => (event.type === "message" ? event.actor.name : ""))).toEqual(["陈睿", "群里的人", "陈睿", "小灵", "", ""]);
@@ -489,6 +493,53 @@ describe("feishu adapter", () => {
     ]);
     expect(http.calls.some((call) => call.path.includes("/contact/"))).toBe(false);
     expect(warnings).toEqual([{ openId: "ou_ghost", detail: "no display name" }]);
+  });
+
+  it("pages chat history with the time window on every page, start_time floored to seconds", async () => {
+    const http = new FakeHttp();
+    let page = 0;
+    http.handler = () => {
+      page += 1;
+      const base = 1789000000000 + (10 - page) * 2000;
+      return {
+        status: 200,
+        json: {
+          code: 0,
+          data: {
+            items: [0, 1].map((index) => ({ message_id: `om_${page}_${index}`, create_time: String(base - index * 1000), msg_type: "text", content: { text: "x" }, chat_id: "oc_1" })),
+            has_more: page < 3,
+            page_token: `p${page}`,
+          },
+        },
+      };
+    };
+    const dir = await mkdtemp(join(tmpdir(), "larkling-feishu-"));
+    const bot = new FeishuChannel({ http, botOpenId: "ou_bot", readGroupMessages: true, stateDir: dir, ratePerSecond: 1000, clock: new ManualClock(0) });
+    const start = new Date(1789000000500).toISOString();
+    const records = await bot.history({ container: "oc_1", start, limit: 500 });
+    expect(http.calls).toHaveLength(3);
+    expect(http.calls.map((call) => call.query?.start_time)).toEqual(["1789000000", "1789000000", "1789000000"]);
+    expect(http.calls.map((call) => call.query?.page_token)).toEqual([undefined, "p1", "p2"]);
+    expect(http.calls[0].query?.end_time).toBeUndefined();
+    expect(records).toHaveLength(6);
+  });
+
+  it("maps the bot's own history sends (sender id_type app_id) to the bot open_id", async () => {
+    const http = new FakeHttp();
+    http.handler = () => ({
+      status: 200,
+      json: { code: 0, data: { items: [{ message_id: "om_self", create_time: "1789000000000", msg_type: "text", content: { text: "hi" }, chat_id: "oc_1", sender: { id: "cli_me", id_type: "app_id", sender_type: "app" } }], has_more: false } },
+    });
+    const dir = await mkdtemp(join(tmpdir(), "larkling-feishu-"));
+    const bot = new FeishuChannel({ http, botOpenId: "ou_bot", appId: "cli_me", readGroupMessages: true, stateDir: dir, ratePerSecond: 1000, clock: new ManualClock(0) });
+    const [record] = await bot.history({ container: "oc_1", limit: 5 });
+    expect(record.actor).toMatchObject({ ref: "ou_bot", stableId: "feishu:ou_bot", isBot: true });
+  });
+
+  it("passes well-formed <at> tags through and downgrades malformed ones", () => {
+    expect(sanitizeAtTags('<at user_id="ou_abc123">张三</at> 好了')).toBe('<at user_id="ou_abc123">张三</at> 好了');
+    expect(sanitizeAtTags('<at user_id="all"></at> 注意')).toBe('<at user_id="all"></at> 注意');
+    expect(sanitizeAtTags('<at user_id="bad id">李四</at>')).toBe("@李四");
   });
 
   it("stops paging a thread once a page is older than the window", async () => {
@@ -517,11 +568,11 @@ describe("feishu adapter", () => {
   });
 });
 
-function receive(openId: string, unionId: string, messageId: string, senderType = "user", chatType = "group") {
+function receive(openId: string, messageId: string, senderType = "user", chatType = "group") {
   return {
     header: { event_id: messageId, event_type: "im.message.receive_v1" },
     event: {
-      sender: { sender_type: senderType, sender_id: { open_id: openId, union_id: unionId } },
+      sender: { sender_type: senderType, sender_id: { open_id: openId } },
       message: {
         message_id: messageId,
         chat_id: chatType === "p2p" ? "oc_dm" : "oc_1",

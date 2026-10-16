@@ -35,7 +35,7 @@ import { newId, sha256 } from "../util/id.js";
 import { Logger } from "../log.js";
 import { purgeOldFiles } from "./cleanup.js";
 import { systemClock, type Clock } from "./clock.js";
-import { checkContext, conversationContext, isSelf, judgeContext, taskContext, unreadLine } from "./context.js";
+import { checkContext, conversationContext, isSelf, judgeContext, taskContext } from "./context.js";
 import { batchTrigger, classifyArrival, takeBatch, withoutMessage } from "./delivery.js";
 import { ApiError, isSteerRejected, SteerRejected } from "./errors.js";
 import { Gate } from "./gate.js";
@@ -46,6 +46,11 @@ import { StateStore } from "./state.js";
 import { TranscriptStore } from "./transcript.js";
 import { resolveTrust, trustAtLeast } from "./trust.js";
 import { selectWindow } from "./window.js";
+import { advanceMark, localIso, newSince, toTurnMessage, type HistoryMark, type StructuredTurn } from "./turninput.js";
+
+const INCREMENTAL_LIMIT = 500;
+const HISTORY_RETRIES = 2;
+const HISTORY_BACKOFF_MS = 300;
 
 export interface BotIdentity {
   ref: string;
@@ -100,6 +105,7 @@ export class Host {
   private readonly losses = new Map<string, number[]>();
   private readonly attachments = new Map<string, AttachmentRef[]>();
   private readonly visibleMessages = new Map<string, Set<string>>();
+  private readonly historyMarks = new Map<string, HistoryMark>();
   private stateStore!: StateStore;
   private persons!: PersonDirectory;
   private transcripts!: TranscriptStore;
@@ -427,6 +433,7 @@ export class Host {
       attachments: message.attachments,
       occurredAt: message.occurredAt,
       audioPrepMs: message.audioPrepMs,
+      mentions: message.mentions,
     }));
     await this.enqueue(sessionId, items);
   }
@@ -522,7 +529,7 @@ export class Host {
     }
     const ensureRuntimeMs = Date.now() - prepStarted;
     const buildStarted = Date.now();
-    const built = await this.buildTurn(sessionId, batch);
+    const built = await this.buildTurn(sessionId, batch, cold);
     const buildTurnMs = Date.now() - buildStarted;
     const turnId = newId();
     const input: TurnInput = { ...built.input, turnId };
@@ -992,7 +999,7 @@ export class Host {
   }
 
   private async runJudge(batch: { scope: Scope; messages: MessageEvent[] }): Promise<void> {
-    const recent = await this.safeHistory(batch.scope, this.config.im.gate.judgeContext);
+    const recent = await this.safeHistory(batch.scope, this.config.im.gate.judgeContext, new Date(this.clock.now() - this.config.im.window.maxAgeMs).toISOString());
     const root = batch.scope.kind === "topic" ? recent[0] : undefined;
     const rendered = (records: ImRecord[]) =>
       records
@@ -1189,7 +1196,7 @@ export class Host {
     });
   }
 
-  private async buildTurn(sessionId: string, batch: QueuedInput[]): Promise<{ input: TurnInput; historyMs: number }> {
+  private async buildTurn(sessionId: string, batch: QueuedInput[], runtimeOpened = false): Promise<{ input: TurnInput; historyMs: number }> {
     const session = this.must(sessionId);
     const token = session.token;
     if (session.kind === "task") {
@@ -1216,46 +1223,66 @@ export class Host {
     const scope = session.scope;
     const messages = batch.filter((item): item is Extract<QueuedInput, { kind: "message" }> => item.kind === "message");
     const records = messages.map((message) => this.recordFromQueued(message, scope));
-    let window: ImRecord[] = records;
+    const triggerIds = new Set(records.map((record) => record.messageId));
+    const runtimeRef = session.runtimeRef ?? "";
+    let mark = this.historyMarks.get(sessionId);
+    // Cold when the live runtime was (re)opened for this turn or the ref changed (reseed).
+    const cold = runtimeOpened || !mark || mark.runtimeRef !== runtimeRef || mark.highMs <= 0;
+    if (cold || !mark) {
+      mark = { runtimeRef, highMs: 0, seen: new Set<string>() };
+      this.historyMarks.set(sessionId, mark);
+    }
+    const sinceMs = mark.highMs;
+    let history: ImRecord[] = [];
     let historyMs = 0;
     if (scope && (scope.kind === "dm" || this.channel.capabilities.readGroupMessages)) {
       const historyStarted = Date.now();
-      const fetched = await this.safeHistory(scope, scope.kind === "topic" ? this.config.im.window.topic : this.config.im.window.group);
-      const stored = await this.imlog.load(scope.id);
+      if (cold) {
+        const limit = scope.kind === "topic" ? this.config.im.window.topic : this.config.im.window.group;
+        const fetched = await this.safeHistory(scope, limit, new Date(this.clock.now() - this.config.im.window.maxAgeMs).toISOString());
+        history = selectWindow(
+          fetched.filter((item) => !triggerIds.has(item.messageId)),
+          { limit, maxTokens: this.config.im.window.maxTokens, maxAgeMs: this.config.im.window.maxAgeMs, now: this.clock.now() },
+        );
+      } else {
+        const fetched = await this.safeHistory(scope, INCREMENTAL_LIMIT, new Date(sinceMs).toISOString());
+        history = newSince(fetched, mark)
+          .filter((item) => !triggerIds.has(item.messageId))
+          .sort((x, y) => x.occurredAt.localeCompare(y.occurredAt) || x.messageId.localeCompare(y.messageId));
+      }
       historyMs = Date.now() - historyStarted;
-      const merged = new Map<string, ImRecord>();
-      for (const item of fetched) merged.set(item.messageId, item);
-      for (const item of stored) merged.set(item.messageId, item);
-      for (const item of records) merged.set(item.messageId, item);
-      window = selectWindow([...merged.values()], {
-        limit: scope.kind === "dm" ? this.config.im.window.group : scope.kind === "topic" ? this.config.im.window.topic : this.config.im.window.group,
-        maxTokens: this.config.im.window.maxTokens,
-        maxAgeMs: this.config.im.window.maxAgeMs,
-        now: this.clock.now(),
-      });
     }
-    for (const record of window) this.noteVisible(sessionId, record);
-    const windowIds = window.map((record) => record.messageId);
-    const unread = unreadLine(window, messages.map((message) => message.messageId), (record) => isSelf(record, this.bot.ref, this.bot.stableId));
+    advanceMark(mark, [...history, ...records]);
+    for (const record of [...history, ...records]) this.noteVisible(sessionId, record);
     const tasks = Object.values(this.stateStore.get().tasks).filter((task) => task.parentSessionId === sessionId);
+    const now = new Date(this.clock.now());
+    const shape = (record: ImRecord) =>
+      toTurnMessage(record, {
+        timeZone: this.config.timezone,
+        now,
+        isSelf: (ref, full) => (full ? isSelf(full, this.bot.ref, this.bot.stableId) : Boolean(this.bot.ref) && ref === this.bot.ref),
+        nameOf: (item) => (isSelf(item, this.bot.ref, this.bot.stableId) && this.bot.name) || item.actor.name || this.persons.displayName(item.actor.stableId, item.actor.ref),
+      });
+    const structured: StructuredTurn | undefined = scope
+      ? {
+          turn: { kind: session.kind, cold, scope: { kind: scope.kind, id: scope.id } },
+          history: cold
+            ? {
+                mode: "full",
+                range: history.length ? { from: localIso(history[0].occurredAt, this.config.timezone), to: localIso(history[history.length - 1].occurredAt, this.config.timezone) } : null,
+                messages: history.map(shape),
+              }
+            : { mode: "incremental", since: localIso(sinceMs, this.config.timezone), newCount: history.length, messages: history.map(shape) },
+          trigger: records.map(shape),
+        }
+      : undefined;
+    if (structured) this.log.info("turn.input", { sessionId, cold, mode: structured.history.mode, historyCount: history.length, triggerCount: records.length });
     const context = scope
       ? conversationContext({
           scope,
           now: this.iso(),
-          windowText: window
-            .map((record) =>
-              renderEnvelope({
-                name: record.actor.name || this.persons.displayName(record.actor.stableId, record.actor.ref),
-                isSelf: isSelf(record, this.bot.ref, this.bot.stableId),
-                occurredAt: record.occurredAt,
-                messageId: record.messageId,
-                body: record.text,
-                timeZone: this.config.timezone,
-                now: new Date(this.clock.now()),
-              }),
-            )
-            .join("\n\n"),
-          unread,
+          windowText: "",
+          turnJson: structured ? JSON.stringify(structured, null, 2) : undefined,
           batch,
           tasks,
           apiUrl: this.apiUrl,
@@ -1265,7 +1292,8 @@ export class Host {
           frontTaskTools: session.runtimeName === "pi",
         })
       : "";
-    const renderedIds = new Set(scope ? windowIds : []);
+    const windowIds = scope ? records.map((record) => record.messageId) : [];
+    const renderedIds = new Set(windowIds);
     const inputMessages: InputMessage[] = [];
     for (const item of batch) {
       if (item.kind === "message") {
@@ -1295,13 +1323,18 @@ export class Host {
     return images;
   }
 
-  private async safeHistory(scope: Scope, limit: number): Promise<ImRecord[]> {
-    const start = new Date(this.clock.now() - this.config.im.window.maxAgeMs).toISOString();
-    try {
-      return await this.channel.history({ container: scope.id, limit, start, withRoot: scope.kind === "topic" });
-    } catch (error) {
-      this.log.warn("history.failed", { container: scope.id, error: String(error) });
-      return [];
+  /** Platform history only. Retries twice with backoff, then degrades to empty. */
+  private async safeHistory(scope: Scope, limit: number, start: string): Promise<ImRecord[]> {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await this.channel.history({ container: scope.id, limit, start, withRoot: scope.kind === "topic" });
+      } catch (error) {
+        if (attempt >= HISTORY_RETRIES) {
+          this.log.warn("history.failed", { container: scope.id, attempts: attempt + 1, error: String(error) });
+          return [];
+        }
+        await new Promise((done) => setTimeout(done, HISTORY_BACKOFF_MS * 2 ** attempt));
+      }
     }
   }
 
@@ -1751,6 +1784,7 @@ export class Host {
       text: message.text,
       attachments: message.attachments,
       mentionsSelf: false,
+      mentions: message.mentions,
       occurredAt: message.occurredAt,
     };
   }

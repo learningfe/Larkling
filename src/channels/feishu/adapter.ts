@@ -14,6 +14,8 @@ const MAX_DOWNLOAD = 100 * 1024 * 1024;
 export interface FeishuChannelOptions {
   http: FeishuHttp;
   botOpenId: string;
+  /** This app's app_id. History lists the bot's own sends with sender id_type app_id; they map to botOpenId. */
+  appId?: string;
   /** App name from bot/v3/info, used when this bot is the sender. */
   botName?: string;
   readGroupMessages: boolean;
@@ -80,7 +82,7 @@ export class FeishuChannel implements ChannelAdapter {
       });
       return this.sent(response);
     }
-    const body = feishuMessageBody(action.text);
+    const body = feishuMessageBody(sanitizeAtTags(action.text));
     if (action.replyTo) {
       const response = await this.options.http.request({
         method: "POST",
@@ -130,20 +132,28 @@ export class FeishuChannel implements ChannelAdapter {
         pageToken = data.page_token;
       }
     } else {
-      await this.limiter.take();
-      const response = await this.options.http.request({
-        method: "GET",
-        path: "/open-apis/im/v1/messages",
-        query: {
-          container_id_type: "chat",
-          container_id: q.container,
-          page_size: String(Math.min(Math.max(q.limit, 1), 50)),
-          start_time: q.start ? toUnix(q.start) : undefined,
-          end_time: q.end ? toUnix(q.end) : undefined,
-          sort_type: "ByCreateTimeDesc",
-        },
-      });
-      collected.push(...(((response.json?.data?.items as FeishuRawMessage[] | undefined) ?? [])));
+      // Time bounds and page_token combine (AND): the window applies to every page.
+      let pageToken: string | undefined;
+      for (let page = 0; page < 10 && collected.length < q.limit; page++) {
+        await this.limiter.take();
+        const response = await this.options.http.request({
+          method: "GET",
+          path: "/open-apis/im/v1/messages",
+          query: {
+            container_id_type: "chat",
+            container_id: q.container,
+            page_size: String(Math.min(Math.max(q.limit - collected.length, 1), 50)),
+            start_time: q.start ? toUnix(q.start) : undefined,
+            end_time: q.end ? toUnix(q.end) : undefined,
+            sort_type: "ByCreateTimeDesc",
+            page_token: pageToken,
+          },
+        });
+        const data = response.json?.data ?? {};
+        collected.push(...(((data.items as FeishuRawMessage[] | undefined) ?? [])));
+        if (!data.has_more || typeof data.page_token !== "string") break;
+        pageToken = data.page_token;
+      }
     }
     let raw = collected.filter((item) => inTime(item.create_time, q.start, q.end));
     if (q.withRoot) {
@@ -279,7 +289,7 @@ export class FeishuChannel implements ChannelAdapter {
     if (resolvedName) actor.name = resolvedName;
     const names = [...normalized.names];
     if (actor.name && actor.ref && !names.some((entry) => entry.stableId === actor.stableId)) {
-      names.unshift({ stableId: actor.stableId, ref: actor.ref, name: actor.name, aliases: actor.aliases });
+      names.unshift({ stableId: actor.stableId, ref: actor.ref, name: actor.name });
     }
     const occurredAt = millisToIso(String(message.create_time ?? Date.now()));
     const events: ChannelEvent[] = [];
@@ -295,6 +305,7 @@ export class FeishuChannel implements ChannelAdapter {
       attachments: normalized.record.attachments,
       mentionsSelf: normalized.mentionsSelf,
       mentionsOthers: normalized.mentionsOthers,
+      mentions: normalized.record.mentions,
       disposition: normalized.disposition,
       replyTo: message.parent_id || undefined,
       occurredAt,
@@ -342,10 +353,11 @@ export class FeishuChannel implements ChannelAdapter {
     const record: ImRecord = {
       messageId,
       scope: scopeFrom(message),
-      actor: actorFromMessage(message),
+      actor: actorFromMessage(message, this.options.appId, this.options.botOpenId),
       text: result.text,
       attachments: result.attachments,
       mentionsSelf: result.mentionsSelf,
+      mentions: result.mentions,
       occurredAt: millisToIso(String(message.create_time ?? Date.now())),
       replyTo: message.parent_id || undefined,
     };
@@ -451,25 +463,23 @@ function scopeFrom(message: FeishuRawMessage): Scope {
   return { channel: "feishu", kind: "group", id: chatId };
 }
 
-function actorFromMessage(message: FeishuRawMessage): Actor {
+function actorFromMessage(message: FeishuRawMessage, appId?: string, botOpenId?: string): Actor {
   const sender = message.sender;
   const ids = sender?.sender_id ?? {};
-  const openId = ids.open_id || (sender?.id_type === "open_id" ? sender.id : "") || "";
-  const unionId = ids.union_id || (sender?.id_type === "union_id" ? sender.id : "") || "";
-  return actorFromIds({ open_id: openId, union_id: unionId }, sender?.sender_type ?? "user");
+  let openId = ids.open_id || (sender?.id_type === "open_id" ? sender.id : "") || "";
+  if (!openId && appId && botOpenId && sender?.id_type === "app_id" && sender.id === appId) openId = botOpenId;
+  return actorFromIds({ open_id: openId }, sender?.sender_type ?? "user");
 }
 
+/** Identity is open_id only; no open_id means unknown. */
 function actorFromIds(ids: Record<string, unknown>, senderType: string, name = ""): Actor {
   const openId = String(ids.open_id ?? ids.openId ?? "");
-  const unionId = String(ids.union_id ?? ids.unionId ?? "");
-  const stableId = openId ? `feishu:${openId}` : unionId ? `feishu-union:${unionId}` : "feishu:unknown";
   return {
     channel: "feishu",
     ref: openId,
-    stableId,
+    stableId: openId ? `feishu:${openId}` : "feishu:unknown",
     name,
     isBot: senderType === "app" || senderType === "bot",
-    aliases: openId && unionId ? [`feishu-union:${unionId}`] : undefined,
   };
 }
 
@@ -529,6 +539,18 @@ export async function loadBotOpenId(http: FeishuHttp): Promise<string | undefine
 
 function textOrUndefined(value: unknown): string | undefined {
   return typeof value === "string" && value ? value : undefined;
+}
+
+/**
+ * The model @s people with Feishu's own `<at user_id="ou_x">Name</at>`, which
+ * text and post `md` render natively. Tags whose id is not well-formed are
+ * downgraded to plain `@Name`; nobody is added.
+ */
+export function sanitizeAtTags(text: string): string {
+  return text.replace(/<at\s+user_id="([^"]*)"\s*>([^<]*)<\/at>/g, (whole, id: string, name: string) => {
+    if (id === "all" || /^ou_[A-Za-z0-9]+$/.test(id)) return `<at user_id="${id}">${id === "all" ? "" : name}</at>`;
+    return name ? `@${name}` : "";
+  });
 }
 
 /**

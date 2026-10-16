@@ -120,12 +120,11 @@ describe("persons", () => {
     expect(people.byStableId("other")?.personId).toBe(actor.stableId);
     expect(people.findByName("bob")).toHaveLength(1);
     const named = await people.observe(
-      { channel: "feishu", ref: "ou_real", stableId: "feishu:ou_real", name: "陈", isBot: false, aliases: ["feishu-union:on_real"] },
+      { channel: "feishu", ref: "ou_real", stableId: "feishu:ou_real", name: "陈", isBot: false },
       "2026-02-04T00:00:00.000Z",
     );
     expect(named.refs[0]).toBe("ou_real");
-    expect(named.identities).toContain("feishu-union:on_real");
-    expect(people.byStableId("feishu-union:on_real")?.personId).toBe("feishu:ou_real");
+    expect(named.identities).toEqual(["feishu:ou_real"]);
   });
 });
 

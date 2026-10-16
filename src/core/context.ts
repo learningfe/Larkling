@@ -37,6 +37,8 @@ export function conversationContext(options: {
   scope: Scope;
   now: string;
   windowText: string;
+  /** Structured turn input (JSON); replaces the rendered window when set. */
+  turnJson?: string;
   unread?: string;
   batch: QueuedInput[];
   tasks: TaskRecord[];
@@ -67,6 +69,7 @@ export function conversationContext(options: {
     lines.push(`Tasks:\n${brief}`);
   }
   if (options.windowText) lines.push(`Recent messages:\n${options.windowText}`);
+  if (options.turnJson) lines.push(`Turn input:\n${options.turnJson}`);
   return lines.join("\n\n");
 }
 

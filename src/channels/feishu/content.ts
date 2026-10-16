@@ -29,7 +29,7 @@ export interface FeishuRawMessage {
 export interface FeishuMention {
   key?: string;
   name?: string;
-  id?: string | { open_id?: string; union_id?: string; user_id?: string };
+  id?: string | { open_id?: string; user_id?: string };
   id_type?: string;
   mentioned_type?: string;
 }
@@ -38,7 +38,7 @@ export interface FeishuSender {
   id?: string;
   id_type?: string;
   sender_type?: string;
-  sender_id?: { open_id?: string; union_id?: string; user_id?: string };
+  sender_id?: { open_id?: string; user_id?: string };
 }
 
 export interface NormalizeContext {
@@ -66,7 +66,9 @@ export interface NormalizeResult {
   mentionsSelf: boolean;
   mentionsOthers: boolean;
   disposition: "normal" | "store_only" | "unsupported";
-  names: { stableId: string; ref: string; name: string; aliases?: string[] }[];
+  names: { stableId: string; ref: string; name: string }[];
+  /** Real @ mentions, in order, deduped. ref "all" is @all. */
+  mentions: { ref: string; name: string }[];
 }
 
 const STORE_ONLY = new Set(["system", "hongbao", "sticker"]);
@@ -172,6 +174,7 @@ export async function normalizeFeishuMessage(raw: FeishuRawMessage, ctx: Normali
     mentionsOthers,
     disposition,
     names,
+    mentions: collectMentions(mentions, msgType === "post" ? content : undefined),
   };
 }
 
@@ -202,11 +205,9 @@ function namesFromMentions(mentions: FeishuMention[]): NormalizeResult["names"] 
   const names: NormalizeResult["names"] = [];
   for (const mention of mentions) {
     const openId = mentionOpenId(mention);
-    const unionId = mentionUnionId(mention);
     if (!openId || !mention.name) continue;
     if (mention.key === "@_all" || openId === "all") continue;
-    const aliases = unionId ? [`feishu-union:${unionId}`] : undefined;
-    names.push({ stableId: `feishu:${openId}`, ref: openId, name: mention.name, aliases });
+    names.push({ stableId: `feishu:${openId}`, ref: openId, name: mention.name });
   }
   return names;
 }
@@ -214,11 +215,6 @@ function namesFromMentions(mentions: FeishuMention[]): NormalizeResult["names"] 
 function mentionOpenId(mention: FeishuMention): string | undefined {
   if (typeof mention.id === "string") return mention.id_type === "open_id" || !mention.id_type ? mention.id : undefined;
   return mention.id?.open_id;
-}
-
-function mentionUnionId(mention: FeishuMention): string | undefined {
-  if (typeof mention.id === "string") return mention.id_type === "union_id" ? mention.id : undefined;
-  return mention.id?.union_id;
 }
 
 function mentionsSelfFrom(mentions: FeishuMention[], botOpenId?: string): boolean {
@@ -234,23 +230,55 @@ function mentionsOthersFrom(mentions: FeishuMention[], botOpenId?: string): bool
   });
 }
 
-export function renderTextMentions(text: string, mentions: FeishuMention[], botOpenId?: string): string {
+export function renderTextMentions(text: string, mentions: FeishuMention[], _botOpenId?: string): string {
   let rendered = text;
   for (const mention of mentions) {
     if (!mention.key) continue;
-    rendered = rendered.split(mention.key).join(mentionLabel(mention, botOpenId));
+    rendered = rendered.split(mention.key).join(mentionLabel(mention));
   }
-  rendered = rendered.replaceAll("@_all", "@所有人");
+  rendered = rendered.replaceAll("@_all", atTag("all", ""));
   return rendered;
 }
 
-/** A mention of the bot always reads as this fixed token, so it never collides with a person's name. */
-export const BOT_MENTION = "@bot";
+/** Feishu's own @ syntax, the same form the model writes to @ someone. */
+export function atTag(userId: string, name: string): string {
+  return userId === "all" ? `<at user_id="all"></at>` : `<at user_id="${userId}">${name}</at>`;
+}
 
-function mentionLabel(mention: FeishuMention, botOpenId?: string): string {
-  if (mention.key === "@_all") return "@所有人";
-  if (botOpenId && mentionOpenId(mention) === botOpenId) return BOT_MENTION;
-  return `@${mention.name || fallbackName(mentionOpenId(mention) || mention.key || "user")}`;
+function mentionLabel(mention: FeishuMention): string {
+  const openId = mentionOpenId(mention);
+  if (mention.key === "@_all" || openId === "all") return atTag("all", "");
+  return atTag(openId || "unknown", mention.name || fallbackName(openId || mention.key || "user"));
+}
+
+function collectMentions(mentions: FeishuMention[], post?: Record<string, unknown>): { ref: string; name: string }[] {
+  const out: { ref: string; name: string }[] = [];
+  const add = (ref: string, name: string) => {
+    if (!ref || out.some((item) => item.ref === ref)) return;
+    out.push({ ref, name });
+  };
+  for (const mention of mentions) {
+    const openId = mentionOpenId(mention);
+    if (mention.key === "@_all" || openId === "all") add("all", "所有人");
+    else if (openId) add(openId, mention.name || fallbackName(openId));
+  }
+  if (post) {
+    for (const row of pickRich(post).rows) {
+      for (const node of row) {
+        if (node.tag === "at") {
+          const userId = String(node.user_id ?? "");
+          if (userId === "all") add("all", "所有人");
+          else if (userId) add(userId, typeof node.user_name === "string" && node.user_name ? node.user_name : fallbackName(userId));
+        } else if (node.tag === "md" || node.tag === "text") {
+          for (const match of String(node.text ?? "").matchAll(/<at\s+user_id="([^"]+)"[^>]*>([^<]*)<\/at>/g)) {
+            const known = mentions.find((item) => mentionOpenId(item) === match[1]);
+            add(match[1], match[1] === "all" ? "所有人" : known?.name || match[2] || fallbackName(match[1]));
+          }
+        }
+      }
+    }
+  }
+  return out;
 }
 
 function renderPost(
@@ -341,21 +369,19 @@ function renderPostNode(
 
 function renderMd(text: string, ctx: NormalizeContext): string {
   return text.replace(/<at\s+user_id="([^"]+)"[^>]*>\s*<\/at>/g, (_all, userId: string) => {
-    if (userId === "all") return "@所有人";
+    if (userId === "all") return atTag("all", "");
     const mention = (ctx.mentions ?? []).find((item) => mentionOpenId(item) === userId);
-    if (ctx.botOpenId && userId === ctx.botOpenId) return BOT_MENTION;
-    return `@${mention?.name || fallbackName(userId)}`;
+    return atTag(userId, mention?.name || fallbackName(userId));
   });
 }
 
 function renderAtTag(node: Record<string, unknown>, ctx: NormalizeContext): string {
   const userId = String(node.user_id ?? "");
-  if (userId === "all" || node.user_name === "所有人") return "@所有人";
+  if (userId === "all" || node.user_name === "所有人") return atTag("all", "");
   const mention = (ctx.mentions ?? []).find((item) => mentionOpenId(item) === userId);
   const tagName = typeof node.user_name === "string" && node.user_name ? node.user_name : undefined;
-  if (ctx.botOpenId && userId === ctx.botOpenId) return BOT_MENTION;
   const name = tagName ?? mention?.name ?? fallbackName(userId || "user");
-  return `@${name}`;
+  return atTag(userId || "unknown", name);
 }
 
 function postMentionsSelf(content: Record<string, unknown>, botOpenId?: string): boolean {

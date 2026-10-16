@@ -26,11 +26,6 @@ export interface Actor {
   stableId: string;
   name: string;
   isBot: boolean;
-  /**
-   * Extra identity keys, such as `feishu-union:<union_id>`.
-   * Not the person key and not the DM address.
-   */
-  aliases?: string[];
 }
 
 export interface Person {
@@ -52,6 +47,11 @@ export interface AttachmentRef {
   name?: string;
 }
 
+export interface MentionRef {
+  ref: string;
+  name: string;
+}
+
 export type MessageDisposition = "normal" | "store_only" | "unsupported";
 
 export interface MessageEvent {
@@ -64,6 +64,8 @@ export interface MessageEvent {
   attachments: AttachmentRef[];
   mentionsSelf: boolean;
   mentionsOthers?: boolean;
+  /** Real @ mentions (authoritative); ref "all" means @all. */
+  mentions?: MentionRef[];
   disposition?: MessageDisposition;
   replyTo?: string;
   occurredAt: string;
@@ -89,7 +91,7 @@ export type ChannelEvent =
       actor: Actor;
       decision: "approve" | "deny";
     }
-  | { type: "names"; entries: { stableId: string; ref: string; name: string; aliases?: string[] }[] };
+  | { type: "names"; entries: { stableId: string; ref: string; name: string }[] };
 
 export type SessionKind = "conversation" | "task" | "check" | "judge" | "compact";
 
@@ -249,6 +251,7 @@ export interface ImRecord {
   text: string;
   attachments: AttachmentRef[];
   mentionsSelf: boolean;
+  mentions?: MentionRef[];
   occurredAt: string;
   recalled?: boolean;
   replyTo?: string;
@@ -307,6 +310,7 @@ export type QueuedInput =
       text: string;
       attachments: AttachmentRef[];
       occurredAt: string;
+      mentions?: MentionRef[];
       /** Wall time spent preparing audio for this message, when present. */
       audioPrepMs?: number;
     }

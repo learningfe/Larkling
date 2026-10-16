@@ -152,29 +152,43 @@ describe("in-memory channel and scripted runtime", () => {
     expect(h.channel.sent.filter((item) => item.action.type === "text" && item.action.text === "front").length).toBeGreaterThan(1);
   });
 
-  it("counts unread messages only after the bot last spoke", async () => {
+  it("sends a structured turn: full window when cold, only new messages while the session lives", async () => {
     const h = await startHarness();
     const scope = { channel: "memory", kind: "dm" as const, id: "ou_owner" };
-    const old = Array.from({ length: 19 }, (_, index) => ({
+    const old = Array.from({ length: 3 }, (_, index) => ({
       messageId: `old${index}`,
       scope,
       actor: ownerActor(),
       text: `old ${index}`,
       attachments: [],
       mentionsSelf: false,
-      occurredAt: "2026-03-15T01:00:00.000Z",
+      occurredAt: `2026-03-15T01:00:0${index}.000Z`,
     }));
     h.channel.histories.set("ou_owner", old);
     h.runtime.handler = async (turn) => turn.emit({ type: "turn.completed", text: "ok" });
-    await pushAndSettle(h, message({ text: "now", messageId: "m-now" }));
-    expect(h.runtime.starts[0].input.context).not.toContain("new messages arrived");
+    await pushAndSettle(h, message({ text: "now", messageId: "m-now", occurredAt: "2026-03-15T01:00:05.000Z" }));
+    const first = turnJson(h.runtime.starts[0].input.context);
+    expect(first.turn).toMatchObject({ cold: true, scope: { kind: "dm", id: "ou_owner" } });
+    expect(first.history.mode).toBe("full");
+    expect(first.history.messages.map((item: { messageId: string }) => item.messageId)).toEqual(["old0", "old1", "old2"]);
+    expect(first.trigger.map((item: { messageId: string; body: string }) => [item.messageId, item.body])).toEqual([["m-now", "now"]]);
+    expect(first.trigger[0].sender.isSelf).toBe(false);
+    expect(first).not.toHaveProperty("audience");
+    expect(first).not.toHaveProperty("self");
+    expect(h.runtime.starts[0].input.messages.every((item) => item.inContext)).toBe(true);
     h.clock.advance(120_000);
     h.channel.histories.set("ou_owner", [
+      ...old,
+      { messageId: "m-now", scope, actor: ownerActor(), text: "now", attachments: [], mentionsSelf: false, occurredAt: "2026-03-15T01:00:05.000Z" },
       { messageId: "mid1", scope, actor: ownerActor(), text: "between", attachments: [], mentionsSelf: false, occurredAt: "2026-03-15T02:01:00.000Z" },
       { messageId: "mid2", scope, actor: ownerActor(), text: "between 2", attachments: [], mentionsSelf: false, occurredAt: "2026-03-15T02:01:30.000Z" },
     ]);
     await pushAndSettle(h, message({ text: "later", messageId: "m-later", occurredAt: "2026-03-15T02:02:00.000Z" }));
-    expect(h.runtime.starts.at(-1)?.input.context).toContain("Since you last spoke, 2 new messages arrived here.");
+    const second = turnJson(h.runtime.starts.at(-1)!.input.context);
+    expect(second.turn.cold).toBe(false);
+    expect(second.history).toMatchObject({ mode: "incremental", newCount: 2 });
+    expect(second.history.messages.map((item: { messageId: string }) => item.messageId)).toEqual(["mid1", "mid2"]);
+    expect(second.trigger.map((item: { messageId: string }) => item.messageId)).toEqual(["m-later"]);
   });
 
   it("replies with the canned line for an unsupported mention and ignores stickers", async () => {
@@ -439,3 +453,9 @@ describe("in-memory channel and scripted runtime", () => {
   });
 
 });
+
+function turnJson(context: string) {
+  const at = context.indexOf("Turn input:\n");
+  if (at < 0) throw new Error("no turn input");
+  return JSON.parse(context.slice(at + "Turn input:\n".length));
+}
