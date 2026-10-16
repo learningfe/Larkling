@@ -146,14 +146,14 @@ export function commandsBlock(options: { cli: string[]; apiUrl: string; token: s
           `Continue a task: ${run("task continue", "--task <taskId> --message '<message>'")}`,
           `List tasks: ${run("task list", "")}`,
           `Read history: ${run("im history", `--container ${container} [--start <messageId>] [--end <messageId>] [--limit <n>]`)}`,
-          `Look up a name: ${run("im who", "--name '<name>'")}`,
         ]
       : [
           `Update the task body: ${run("task update", "--task <taskId> --version <version> --body '<body>' [--follow-up]")}`,
           `Get the task: ${run("task get", "--task <taskId>")}`,
           `Read history: ${run("im history", `--container ${container} [--start <messageId>] [--end <messageId>] [--limit <n>]`)}`,
           `Fetch a file: ${run("im file", "--message <messageId> --key <fileKey>")}`,
-          `Look up a name: ${run("im who", "--name '<name>'")}`,
+          `Find a person: ${run("person lookup", "--open-id <ou_...> | --query '<name>' [--scope all]")}`,
+          `Find a group: ${run("group lookup", "--chat-id <oc_...> | --query '<name>' [--members]")}`,
         ];
   return `Commands (run exactly as written; replace only <...> and drop unused [...]):\n${lines.join("\n")}`;
 }

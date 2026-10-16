@@ -11,7 +11,8 @@ export interface ApiHandlers {
   taskCancel(token: string, taskId: string): Promise<TaskRecord>;
   imHistory(token: string, body: { container: string; start?: string; end?: string; limit?: number }): Promise<unknown>;
   imFile(token: string, body: { messageId: string; key: string }): Promise<unknown>;
-  imWho(token: string, body: { name: string }): Promise<unknown>;
+  personLookup(token: string, body: { openId?: string; query?: string; scope?: "current" | "all" }): Promise<unknown>;
+  groupLookup(token: string, body: { chatId?: string; query?: string; includeMembers?: boolean }): Promise<unknown>;
 }
 
 export async function listenApi(handlers: ApiHandlers): Promise<{ url: string; close: () => Promise<void> }> {
@@ -59,8 +60,11 @@ async function handle(req: IncomingMessage, res: ServerResponse, handlers: ApiHa
       case "POST /v1/im/file":
         payload = await handlers.imFile(token, body as { messageId: string; key: string });
         break;
-      case "POST /v1/im/who":
-        payload = await handlers.imWho(token, body as { name: string });
+      case "POST /v1/person/lookup":
+        payload = await handlers.personLookup(token, body as { openId?: string; query?: string; scope?: "current" | "all" });
+        break;
+      case "POST /v1/group/lookup":
+        payload = await handlers.groupLookup(token, body as { chatId?: string; query?: string; includeMembers?: boolean });
         break;
       default:
         throw new ApiError("NOT_FOUND", "unknown route", 404);

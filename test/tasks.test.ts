@@ -61,6 +61,14 @@ describe("tasks", () => {
     expect(ownerList.status).toBe(200);
     expect(ownerList.json).toHaveLength(1);
 
+    const frontLookup = await post(h.host.apiUrl, parent.token, "/v1/person/lookup", { query: "x" });
+    expect(frontLookup.status).toBe(403);
+    const backLookup = await post(h.host.apiUrl, taskSession.token, "/v1/person/lookup", { query: "nobody" });
+    expect(backLookup.status).toBe(200);
+    expect(backLookup.json.matches).toEqual([]);
+    const groupLookup = await post(h.host.apiUrl, taskSession.token, "/v1/group/lookup", {});
+    expect(groupLookup.status).toBe(400);
+    expect((await post(h.host.apiUrl, taskSession.token, "/v1/im/who", { name: "x" })).status).toBe(404);
     const other = await post(h.host.apiUrl, parent.token, "/v1/im/history", { container: "oc_other", limit: 5 });
     expect(other.status).toBe(403);
     h.channel.histories.set("ou_owner", [

@@ -584,3 +584,25 @@ function receive(openId: string, messageId: string, senderType = "user", chatTyp
     },
   };
 }
+
+describe("feishu directory", () => {
+  it("turns im.chat.updated_v1 into a chat_updated event and pages members", async () => {
+    const http = new FakeHttp();
+    http.handler = (input) =>
+      input.path.endsWith("/members")
+        ? input.query?.page_token
+          ? { status: 200, json: { code: 0, data: { items: [{ member_id: "ou_2", name: "李四" }], has_more: false } } }
+          : { status: 200, json: { code: 0, data: { items: [{ member_id: "ou_1", name: "张三" }], has_more: true, page_token: "p2" } } }
+        : { status: 200, json: { code: 0, data: { name: "测试群" } } };
+    const channel = new FeishuChannel({ http, botOpenId: "ou_bot", readGroupMessages: true, stateDir: await mkdtemp(join(tmpdir(), "larkling-fs-")) });
+    expect(await channel.chatMembers("oc_1")).toEqual([
+      { openId: "ou_1", name: "张三" },
+      { openId: "ou_2", name: "李四" },
+    ]);
+    expect(await channel.chatInfo("oc_1")).toEqual({ name: "测试群" });
+    const events = await collect(channel, () =>
+      channel.ingest({ header: { event_type: "im.chat.updated_v1" }, event: { chat_id: "oc_1", after_change: { name: "新群名" }, before_change: { name: "旧" } } }),
+    );
+    expect(events).toEqual([{ type: "chat_updated", chatId: "oc_1", name: "新群名" }]);
+  });
+});
