@@ -147,7 +147,7 @@ export const configFileSchema = z
     session: z
       .object({
         turnIdleTimeout: duration.default("15m"),
-        botChainLimit: z.number().int().positive().default(3),
+        botChainLimit: z.number().int().positive().default(10),
       })
       .default({}),
     agents: z.object({

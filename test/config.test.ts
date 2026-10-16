@@ -76,6 +76,7 @@ describe("config", () => {
     expect(loaded.trust).toEqual({ trusted: ["feishu:on_t"], allowed: [], restricted: ["oc_locked"] });
     const defaults = await resolveConfig({ owner: "feishu:on_owner", channel: { memory: {} }, agents }, {});
     expect(defaults.trust).toEqual({ trusted: [], allowed: [], restricted: [] });
+    expect(defaults.session.botChainLimit).toBe(10);
     await expect(
       resolveConfig(
         { owner: "feishu:on_owner", channel: { memory: {} }, agents, trust: { groups: ["oc_old"] } },

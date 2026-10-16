@@ -48,7 +48,7 @@ persona:
   # name: 小灵
   duty: ""
 
-session: { turnIdleTimeout: 15m, botChainLimit: 3 }
+session: { turnIdleTimeout: 15m, botChainLimit: 10 }
 agents:
   front:
     runtime: codex

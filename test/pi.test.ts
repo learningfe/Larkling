@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import {readFile, realpath} from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -348,7 +348,7 @@ describe("PiRuntime over a fake pi process", () => {
     const first = JSON.parse((await readFile(logPath, "utf8")).split("\n")[0]) as { argv: string[]; cwd: string };
     expect(first.argv).toContain("--provider");
     expect(first.argv[first.argv.indexOf("--provider") + 1]).toBe("openai-codex");
-    expect(first.cwd).toBe(dir);
+    expect(await realpath(first.cwd!)).toBe(await realpath(dir));
     runtime.close();
   });
 });
