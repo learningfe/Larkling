@@ -30,7 +30,9 @@ describe("in-memory channel and scripted runtime", () => {
     expect(h.runtime.starts[0].input.context).toContain("Token:");
     expect(h.runtime.starts[0].input.context).toContain("hello");
     expect(h.runtime.starts[0].input.messages[0].inContext).toBe(true);
-    expect(h.runtime.starts[0].input.context).toMatch(/Cancel a task: \S+ \S+ task cancel --api http\S+ --token \S+ --task <taskId>/);
+    expect(h.runtime.starts[0].input.context).toMatch(/Continue a task: /);
+    expect(h.runtime.starts[0].input.context).not.toMatch(/Cancel a task: /);
+    expect(h.runtime.starts[0].input.context).not.toMatch(/Start a task: /);
     await pushAndSettle(h, message({ text: "quiet", messageId: "m2" }));
     expect(h.channel.sent).toHaveLength(1);
   });

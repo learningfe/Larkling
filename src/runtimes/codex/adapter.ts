@@ -2,6 +2,7 @@ import type { HealthItem, RuntimeAdapter, RuntimeEvent, RuntimeProfile, RuntimeR
 import { AsyncQueue } from "../../util/async-queue.js";
 import { SteerRejected } from "../../core/errors.js";
 import { MemoryCodexTransport, StdioCodexTransport, type CodexTransport } from "./transport.js";
+import { dynamicToolsForKind, runDynamicTool } from "./dynamic-tools.js";
 
 interface RpcMessage {
   id?: number;
@@ -15,6 +16,8 @@ interface ThreadState {
   sessionId: string;
   threadId: string;
   profile: RuntimeProfile;
+  kind: SessionSpec["kind"];
+  toolEnv?: { apiUrl: string; token: string };
   codexTurnId?: string;
   ourTurnId?: string;
   agentText: string;
@@ -56,22 +59,25 @@ export class CodexRuntime implements RuntimeAdapter {
   async open(session: SessionSpec): Promise<RuntimeRef> {
     await this.connect();
     const profile = session.profile;
+    const toolEnv = parseToolEnv(session.toolEnv);
     if (session.runtimeRef) {
       const result = await this.request("thread/resume", { threadId: session.runtimeRef, ...threadConfig(profile) });
       const threadId = String(asRecord(result.thread)?.id ?? session.runtimeRef);
-      this.remember(threadId, session.sessionId, profile);
+      this.remember(threadId, session.sessionId, profile, session.kind, toolEnv);
       return threadId;
     }
+    const tools = toolEnv ? dynamicToolsForKind(session.kind) : undefined;
     const result = await this.request("thread/start", {
       ...threadConfig(profile),
       model: profile.model,
       developerInstructions: session.instructions,
       ephemeral: session.kind === "check" || session.kind === "judge" || session.kind === "compact",
       serviceName: "larkling",
+      ...(tools?.length ? { dynamicTools: tools } : {}),
     });
     const threadId = String(asRecord(result.thread)?.id ?? "");
     if (!threadId) throw new Error("thread/start did not return a thread id");
-    this.remember(threadId, session.sessionId, profile, session.seed);
+    this.remember(threadId, session.sessionId, profile, session.kind, toolEnv, session.seed);
     return threadId;
   }
 
@@ -143,8 +149,15 @@ export class CodexRuntime implements RuntimeAdapter {
     this.eventsQueue.close();
   }
 
-  private remember(threadId: string, sessionId: string, profile: RuntimeProfile, seed?: Seed): void {
-    const state: ThreadState = { sessionId, threadId, profile, agentText: "" };
+  private remember(
+    threadId: string,
+    sessionId: string,
+    profile: RuntimeProfile,
+    kind: SessionSpec["kind"],
+    toolEnv?: { apiUrl: string; token: string },
+    seed?: Seed,
+  ): void {
+    const state: ThreadState = { sessionId, threadId, profile, kind, toolEnv, agentText: "" };
     if (seed?.text.trim()) state.pendingSeed = seed;
     this.threads.set(threadId, state);
     this.byThread.set(threadId, threadId);
@@ -175,6 +188,7 @@ export class CodexRuntime implements RuntimeAdapter {
     this.reader = this.readLoop();
     await this.request("initialize", {
       clientInfo: { name: "larkling", title: "Larkling", version: "0.1.0" },
+      capabilities: { experimentalApi: true, requestAttestation: false },
     });
     this.transport.send({ method: "initialized", params: {} });
     this.initialized = true;
@@ -224,6 +238,10 @@ export class CodexRuntime implements RuntimeAdapter {
   private onServerRequest(message: RpcMessage): void {
     const method = message.method ?? "";
     const params = message.params ?? {};
+    if (method === "item/tool/call" && message.id != null) {
+      void this.handleDynamicToolCall(message.id, params);
+      return;
+    }
     const kind = approvalKind(method);
     if (!kind || message.id == null) {
       this.transport?.send({ id: message.id, result: { decision: "decline" } });
@@ -246,6 +264,36 @@ export class CodexRuntime implements RuntimeAdapter {
       kind,
       summary,
     });
+  }
+
+  private async handleDynamicToolCall(rpcId: number, params: Record<string, unknown>): Promise<void> {
+    const threadId = String(params.threadId ?? "");
+    const state = this.threads.get(threadId);
+    const tool = String(params.tool ?? "");
+    const args = asRecord(params.arguments) ?? {};
+    if (!state?.toolEnv) {
+      this.transport?.send({
+        id: rpcId,
+        result: { contentItems: [{ type: "inputText", text: "dynamic tools unavailable" }], success: false },
+      });
+      return;
+    }
+    this.eventsQueue.push({
+      type: "activity",
+      sessionId: state.sessionId,
+      turnId: state.ourTurnId ?? "",
+      summary: `tool:${tool}`,
+    });
+    try {
+      const result = await runDynamicTool(tool, args, state.toolEnv);
+      this.transport?.send({ id: rpcId, result });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.transport?.send({
+        id: rpcId,
+        result: { contentItems: [{ type: "inputText", text: message }], success: false },
+      });
+    }
   }
 
   private onNotification(method: string, params: Record<string, unknown>): void {
@@ -359,11 +407,19 @@ export function toCodexInput(input: TurnInput, seed?: string): unknown[] {
   return items;
 }
 
+
+function parseToolEnv(env?: Record<string, string>): { apiUrl: string; token: string } | undefined {
+  const apiUrl = env?.LARKLING_API_URL?.trim();
+  const token = env?.LARKLING_SESSION_TOKEN?.trim();
+  if (!apiUrl || !token) return undefined;
+  return { apiUrl, token };
+}
+
 function approvalKind(method: string): "command" | "file_change" | "permission" | "tool" | undefined {
   if (method === "item/commandExecution/requestApproval") return "command";
   if (method === "item/fileChange/requestApproval") return "file_change";
   if (method === "item/permissions/requestApproval") return "permission";
-  if (method === "item/tool/call" || method === "tool/requestUserInput" || method === "item/tool/requestUserInput") return "tool";
+  if (method === "tool/requestUserInput" || method === "item/tool/requestUserInput") return "tool";
   return undefined;
 }
 
