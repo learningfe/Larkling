@@ -28,7 +28,7 @@ import { conversationSessionId, scopeKey, taskSessionId } from "../protocol/type
 import { parseCheckReply, parseConversationReply, parseJudgeReply } from "../protocol/reply.js";
 import { buildSeed, transcriptTokens } from "../protocol/seed.js";
 import { renderEnvelope } from "../channels/envelope.js";
-import { backInstructions, checkInstructions, compactInstructions, frontInstructions, judgeInstructions, withFile } from "../tasks/prompts.js";
+import { backInstructions, compactInstructions, frontInstructions, heartbeatInstructions, relevanceInstructions, withFile } from "../tasks/prompts.js";
 import { listenApi } from "../tasks/api.js";
 import { heartbeatDue, slotsUsed } from "../tasks/scheduler.js";
 import { newId, sha256 } from "../util/id.js";
@@ -1226,7 +1226,7 @@ export class Host {
             cli: this.cli,
             taskId: task?.taskId ?? session.taskId,
             version: task?.version,
-            backTaskTools: session.runtimeName === "pi",
+            backTaskTools: this.usesAgentTools(session),
           }),
           messages: [{ text: prompt }],
         },
@@ -1302,7 +1302,7 @@ export class Host {
           token,
           sessionId,
           cli: this.cli,
-          frontTaskTools: session.runtimeName === "pi",
+          frontTaskTools: this.usesAgentTools(session),
         })
       : "";
     const windowIds = scope ? records.map((record) => record.messageId) : [];
@@ -1750,17 +1750,23 @@ export class Host {
     const duty = this.config.persona.duty;
     const name = this.config.persona.name || this.bot.name || "assistant";
     if (kind === "task") return withFile(backInstructions(persona, duty), this.config.agents.back.instructions);
-    if (kind === "check") return checkInstructions();
-    if (kind === "judge") return judgeInstructions(persona, duty, name);
+    if (kind === "check") return heartbeatInstructions();
+    if (kind === "judge") return relevanceInstructions(persona, duty, name);
     if (kind === "compact") return compactInstructions();
     return withFile(frontInstructions(persona, duty, name), this.config.agents.front.instructions);
   }
 
-  /** Env for front tools (task_start / task_cancel). Only conversation sessions on pi use them. */
+  /** Env for agent tools (pi extensions / Codex dynamicTools). Conversation and task sessions. */
   private toolEnvFor(session: SessionRecord): Record<string, string> | undefined {
-    if (session.runtimeName !== "pi") return undefined;
+    if (session.runtimeName !== "pi" && session.runtimeName !== "codex") return undefined;
     if (session.kind !== "conversation" && session.kind !== "task") return undefined;
     return { LARKLING_API_URL: this.apiUrl, LARKLING_SESSION_TOKEN: session.token };
+  }
+
+  /** Dedicated task tools (pi extensions or Codex dynamicTools) instead of CLI wrappers. */
+  private usesAgentTools(session: SessionRecord): boolean {
+    return (session.runtimeName === "pi" || session.runtimeName === "codex") &&
+      (session.kind === "conversation" || session.kind === "task");
   }
 
   private profileFor(kind: SessionKind) {

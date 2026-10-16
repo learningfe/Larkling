@@ -1,7 +1,7 @@
 /**
  * Shared HTTP helpers for agent tools (front and back).
  * Pi extensions call the same routes via env-injected URL/token.
- * A future Codex MCP can import these helpers unchanged.
+ * Codex dynamicTools and pi extensions both call these helpers.
  */
 
 export type AgentToolHttpResult = { status: number; text: string };

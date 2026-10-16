@@ -92,7 +92,7 @@ npm test
 - 每个打开的会话起一个 pi 进程，空闲回收时进程退出。会话文件放在 `runtimes.pi.sessionDir`，默认是状态目录下的 `pi-sessions`（`~/.larkling/state/pi-sessions`），不碰 `~/.pi` 里的会话。检查、相关性判断和压缩用 `--no-session`，不留文件。
 - provider 一定要写。pi 自己默认用 google，所以 Larkling 总是显式传 `--provider` 和 `--model`。可以写在 `runtimes.pi.provider`，也可以在 `agents.<front|back>.provider` 单独覆盖。ChatGPT Plus/Pro 订阅对应的 provider 是 `openai-codex`。
 - 登录由你自己在终端里跑 `pi`，再执行 `/login`。凭据存在 pi 自己的 `~/.pi/agent/auth.json`，Larkling 不读也不写。
-- 系统提示词用 `--system-prompt` 传入，同时带上 `--no-context-files`、`--no-skills`、`--no-extensions`、`--no-prompt-templates` 和 `--no-themes`，不加载 AGENTS.md、技能和扩展。
+- 内置系统提示词按 FRONT / BACK / HEARTBEAT / RELEVANCE 拆在 `src/tasks/prompts/`。Codex 前台/后台会话通过 app-server `dynamicTools` 暴露与 pi 相同的任务与目录工具。系统提示词用 `--system-prompt` 传入，同时带上 `--no-context-files`、`--no-skills`、`--no-extensions`、`--no-prompt-templates` 和 `--no-themes`，不加载 AGENTS.md、技能和扩展。
 - `effort` 对应 pi 的 `--thinking`：`none` 写成 `off`，`minimal`、`low`、`medium`、`high`、`xhigh` 原样传。认不出的值不传，用 pi 默认值。
 - 新会话的历史种子放进第一回合的消息前面。恢复已有会话不再注入。恢复时如果会话文件已经不在，Larkling 会新开一个会话，并重新注入种子。
 - 运行中的追加消息走 pi 的 `steer`，打断走 `abort`。工具调用会作为活动事件上报。上下文快满时 pi 自己会压缩，Larkling 的转录压缩照常进行。

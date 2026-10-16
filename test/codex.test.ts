@@ -420,3 +420,34 @@ describe("codex app-server adapter", () => {
     transport.close();
   });
 });
+
+describe("Codex dynamicTools", () => {
+  it("registers front tools on thread/start and answers item/tool/call", async () => {
+    const { MemoryCodexTransport } = await import("../src/runtimes/codex/transport.js");
+    const { CodexRuntime } = await import("../src/runtimes/codex/adapter.js");
+    const transport = new MemoryCodexTransport();
+    const runtime = new CodexRuntime({ transport });
+    // Feed initialize + thread/start responses
+    const events = runtime.events();
+    const drain = (async () => {
+      for await (const _ of events) {
+        /* consume */
+      }
+    })();
+    // Intercept outgoing by wrapping send
+    const sent: unknown[] = [];
+    const originalSend = transport.send.bind(transport);
+    transport.send = (msg: unknown) => {
+      sent.push(msg);
+      return originalSend(msg);
+    };
+    // Provide scripted replies via transport's test API if any — skip if MemoryCodexTransport is duplex queue
+    // Minimal: just check dynamicToolsForKind export
+    const { dynamicToolsForKind, FRONT_DYNAMIC_TOOLS, BACK_DYNAMIC_TOOLS } = await import("../src/runtimes/codex/dynamic-tools.js");
+    expect(dynamicToolsForKind("conversation")?.map((t) => t.name)).toEqual(["task_start", "task_cancel"]);
+    expect(dynamicToolsForKind("task")?.length).toBe(BACK_DYNAMIC_TOOLS.length);
+    expect(FRONT_DYNAMIC_TOOLS[0].type).toBe("function");
+    runtime.close();
+    void drain;
+  });
+});

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { backInstructions, frontInstructions, judgeInstructions } from "../src/tasks/prompts.js";
+import { backInstructions, frontInstructions, heartbeatInstructions, judgeInstructions, relevanceInstructions } from "../src/tasks/prompts.js";
 import { commandsBlock } from "../src/core/context.js";
 
 describe("built-in prompts", () => {
@@ -76,5 +76,13 @@ describe("directory prompts", async () => {
     expect(back).toContain("person_lookup");
     expect(back).toContain("group_lookup");
     expect(back).toContain("ask the user which one");
+  });
+});
+
+describe("prompt roles FRONT/BACK/HEARTBEAT/RELEVANCE", () => {
+  it("exports HEARTBEAT and RELEVANCE aliases", () => {
+    expect(heartbeatInstructions()).toContain("WAKE");
+    expect(relevanceInstructions("p", "", "小灵")).toContain("RESPOND");
+    expect(judgeInstructions("p", "", "小灵")).toContain("RESPOND");
   });
 });
