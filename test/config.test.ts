@@ -63,6 +63,27 @@ describe("config", () => {
     expect(loaded.agents.back.extra).toEqual({ custom: 1 });
   });
 
+  it("locks groups with trust.restricted and rejects the old whitelist", async () => {
+    const loaded = await resolveConfig(
+      {
+        owner: "feishu:on_owner",
+        channel: { memory: {} },
+        agents,
+        trust: { restricted: ["oc_locked"], trusted: ["feishu:on_t"] },
+      },
+      {},
+    );
+    expect(loaded.trust).toEqual({ trusted: ["feishu:on_t"], allowed: [], restricted: ["oc_locked"] });
+    const defaults = await resolveConfig({ owner: "feishu:on_owner", channel: { memory: {} }, agents }, {});
+    expect(defaults.trust).toEqual({ trusted: [], allowed: [], restricted: [] });
+    await expect(
+      resolveConfig(
+        { owner: "feishu:on_owner", channel: { memory: {} }, agents, trust: { groups: ["oc_old"] } },
+        {},
+      ),
+    ).rejects.toThrow(/trust\.groups/);
+  });
+
   it("leaves dsh unimplemented", () => {
     expect(() => createDshRuntime()).toThrow(/not implemented/);
   });

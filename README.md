@@ -19,6 +19,14 @@ src/cli/          larkling 命令
 
 `owner` 写成 `feishu:` 加上你的 `open_id`（`ou_` 开头）。身份只认 `open_id`，不读 `union_id`。`persona.name` 不写时，启动后用飞书应用名称（`/open-apis/bot/v3/info` 的 `app_name`）。群和话题的近期窗口除了条数和 token，还按 `im.window.maxAge` 丢掉更早的消息，默认 24 小时。机器人已经回复过的话题里，之后没 @ 的消息会走相关性判断；某个 scope 在 `respondTo.scopes` 里写了规则时，以配置为准。要停掉后台任务，直接用自然语言说，前台会取消对应任务；对得上不止一个时，会先列出来问你。`agents.front` 和 `agents.back` 都可以写 `fast: true`（默认 `false`）。打开后这一侧的回合走更快的服务档位；检查、相关性判断和压缩用的轻量配置也沿用同一个开关。`network` 默认 `false`。设为 `true` 时，这一侧沙箱里的命令可以访问网络；轻量回合不打开网络。前台工作目录默认是状态目录下的 `front`（也就是 `~/.larkling/state/front`），可以用 `agents.front.cwd` 改掉。前台在 pi 上通过专用工具 `task_start` / `task_cancel` 起停后台任务；后台用 `task_update` / `task_complete`（以及 `task_get`、`im_history`、`im_file`、`im_who`）。API 地址和会话令牌由进程环境注入。同一套 HTTP 辅助函数留给以后的 Codex 适配复用。确认文案仍由模型自己写。私聊里用户和机器人的每一条消息都会写入 imlog（群/话题仍按 @、机器人自己的发送、以及已参与话题的规则）。每次 conversation 回合开始前打一条 `turn.prep` 日志，字段有 cold、ensureRuntimeMs、seedMs、openMs、buildTurnMs、historyMs、audioMs、totalMs，用来对冷启动和热启动分段计时。每个 conversation 回合开头给模型一段结构化 JSON（`turn` / `history` / `trigger`）：冷启动拉完整窗口（群会翻页到条数上限），同一前台会话存活期间只按时间增量拉新消息并按消息 id 去重；窗口只来自飞书平台历史，不再并入 imlog。正文里真实的 @ 用飞书写法 `<at user_id="ou_xxx">名字</at>`，以 `mentions` 字段为准；模型回复里也用同样写法 @ 人。
 
+## 信任
+
+入口只决定这条消息能不能进会话，不决定要不要回复。群里仍按 `im.respondTo` 和 Gate 处理：默认要 @，配成 `relevant` 才做相关性判断。`session.botChainLimit` 只截断同一个会话里连续的机器人互聊，不是信任拒绝。
+
+`owner` 在任何会话里都放行。`trust.trusted` 和 `trust.allowed` 合成一份个人白名单，入口规则相同，返回的角色标签仍分开。私聊，以及没有父群的话题，只认所有者和这份白名单。普通群和来自群的话题默认开放：没被点名的人和机器人都是 `allowed`。写进 `trust.restricted` 的 chat id 收紧到个人白名单；话题跟随父群，父群或话题自己的 id 在名单里都算锁住。`restricted` 为空时，所有群都开放。
+
+升级时删掉原来的 `trust.groups`。那个字段是开放群白名单，和现在的含义相反，不要把里面的 chat id 抄进 `trust.restricted`。删掉之后，以前没写进 `groups` 的群也会变成开放；只有确实要锁住的群，才把它的 chat id 写进 `restricted`。配置里再出现 `trust.groups` 会直接被拒绝。
+
 ## 命令
 
 ```
@@ -58,7 +66,7 @@ npm test
    npm run build
    ```
 
-5. 把 `examples/config.yaml` 复制到 `~/.larkling/config.yaml`。`owner` 写成 `feishu:` 加上你自己的 `open_id`。`appId` 换成应用的 App ID。模型换成你的 Codex 账号支持的名字，示例里是 `gpt-6.1-sol` 和 `gpt-6-luna`。
+5. 把 `examples/config.yaml` 复制到 `~/.larkling/config.yaml`。`owner` 写成 `feishu:` 加上你自己的 `open_id`。`appId` 换成应用的 App ID。模型换成你的 Codex 账号支持的名字，示例里是 `gpt-6.1-sol` 和 `gpt-6-luna`。群默认开放。要锁住某个群，把 chat id 写进 `trust.restricted`。不要再写 `trust.groups`。
 6. 导出密钥并检查配置：
 
    ```bash

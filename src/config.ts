@@ -102,11 +102,13 @@ export const configFileSchema = z
         trusted: z.array(z.string()).default([]),
         allowed: z.array(z.string()).default([]),
         /**
-         * Chat ids where a human who is not listed is treated as allowed.
-         * Bots stay denied unless their stableId is listed. Topics inherit the parent chat.
+         * Chat ids locked to the personal allowlist (owner, trusted, allowed).
+         * Empty means every group is open. Topics inherit the parent chat.
+         * Listing an id closes that chat; this is not an open-group whitelist.
          */
-        groups: z.array(z.string()).default([]),
+        restricted: z.array(z.string()).default([]),
       })
+      .strict()
       .default({}),
     im: z
       .object({
@@ -228,7 +230,7 @@ export interface LarklingConfig {
       }
     | { kind: "memory"; readGroupMessages: boolean };
   owner: string;
-  trust: { trusted: string[]; allowed: string[]; groups: string[] };
+  trust: { trusted: string[]; allowed: string[]; restricted: string[] };
   im: {
     window: { group: number; topic: number; maxTokens: number; maxAgeMs: number };
     respondTo: { default: "mention" | "relevant"; scopes: Record<string, "mention" | "relevant"> };
@@ -257,13 +259,27 @@ export async function loadConfig(path: string, env: NodeJS.ProcessEnv = process.
   return resolveConfig(parseYaml(raw), env, home, path);
 }
 
+const removedTrustGroups =
+  "trust.groups was removed. Groups are open unless listed in trust.restricted. Delete trust.groups; do not copy those chat ids into restricted (that inverts the old open-group whitelist).";
+
+function parseConfigFile(input: unknown): ConfigFile {
+  const result = configFileSchema.safeParse(input);
+  if (result.success) return result.data;
+  for (const issue of result.error.issues) {
+    if (issue.code !== "unrecognized_keys" || issue.path[0] !== "trust" || !issue.keys.includes("groups")) continue;
+    // A generic unrecognized-key error would invite copying the old whitelist into restricted.
+    throw new Error(removedTrustGroups);
+  }
+  throw result.error;
+}
+
 export async function resolveConfig(
   input: unknown,
   env: NodeJS.ProcessEnv = process.env,
   home = homedir(),
   sourcePath?: string,
 ): Promise<LarklingConfig> {
-  const parsed = configFileSchema.parse(input);
+  const parsed = parseConfigFile(input);
   const baseDir = sourcePath ? resolve(sourcePath, "..") : process.cwd();
   const agent = async (value: z.infer<typeof agentSchema>): Promise<AgentConfig> => {
     const { runtime, provider, model, light, instructions, sandbox, cwd, effort, approvalPolicy, fast, network, ...extra } = value;

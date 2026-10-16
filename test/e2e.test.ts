@@ -124,7 +124,6 @@ describe("in-memory channel and scripted runtime", () => {
   it("judges later messages in a topic the bot has replied in", async () => {
     const h = await startHarness((config) => {
       config.im.gate.debounceMs = 1_000;
-      config.trust.groups = ["oc_family"];
     });
     h.runtime.handler = async (turn) => {
       if (turn.spec.kind === "judge") {
@@ -213,7 +212,6 @@ describe("in-memory channel and scripted runtime", () => {
   it("stops a bot chain at the limit until a human speaks, and ignores the bot itself", async () => {
     const h = await startHarness((config) => {
       config.session.botChainLimit = 3;
-      config.trust.groups = ["oc_group"];
     });
     const scope = groupScope();
     const otherBot = { channel: "memory", ref: "ou_other", stableId: "feishu:on_allowed", name: "Other", isBot: true };
@@ -338,7 +336,6 @@ describe("in-memory channel and scripted runtime", () => {
     const h = await startHarness((config) => {
       config.im.respondTo.default = "relevant";
       config.im.gate.debounceMs = 5_000;
-      config.trust.groups = ["oc_group"];
     });
     h.runtime.handler = async (turn) => {
       if (turn.spec.kind === "judge") {
@@ -372,7 +369,6 @@ describe("in-memory channel and scripted runtime", () => {
       config.agents.back.network = true;
       config.agents.back.model = "back-model";
       config.im.gate.debounceMs = 1_000;
-      config.trust.groups = ["oc_family"];
     });
     h.runtime.handler = async (turn) => {
       turn.emit({ type: "turn.completed", text: turn.spec.kind === "judge" ? "RESPOND" : "ok" });

@@ -27,10 +27,15 @@ channel:
 
 # 身份主键是 open_id：feishu:ou_xxx。union_id 只作为附加引用，不能写在这里。
 owner: feishu:ou_xxx
+# trusted 与 allowed 在入口放行上是同一份个人白名单，角色标签仍分开。
+# owner 在任何会话都放行。私聊只认 owner 和个人白名单。
+# 群默认开放：未列出的人和机器人都是 allowed。话题跟随父群。
+# restricted 里的 chat id 收紧到个人白名单。留空表示所有群都开放。
+# 不要把旧的 trust.groups（开放白名单）抄到这里，列出来的含义是锁住，不是放开。
 trust:
   trusted: []
   allowed: []
-  groups: []
+  restricted: []
 
 im:
   # maxAge 会丢掉更早的历史，默认 24 小时，另外还受条数和 token 限制。
