@@ -157,3 +157,19 @@ describe("window and envelope", () => {
     expect(older.startsWith("[Ada 2024-01-02 08:30 #old]")).toBe(true);
   });
 });
+
+describe("imlog.shouldStore", () => {
+  it("keeps every DM message and mentions or participated topics", async () => {
+    const { ImLog } = await import("../src/core/imlog.js");
+    const log = new ImLog(await tempDir());
+    const dm = { channel: "memory" as const, kind: "dm" as const, id: "ou_x" };
+    const group = { channel: "memory" as const, kind: "group" as const, id: "oc_g" };
+    const topic = { channel: "memory" as const, kind: "topic" as const, id: "omt_1", parentId: "oc_g" };
+    expect(log.shouldStore({ scope: dm, mentionsSelf: false, fromBot: false }, [])).toBe(true);
+    expect(log.shouldStore({ scope: dm, mentionsSelf: false, fromBot: true }, [])).toBe(true);
+    expect(log.shouldStore({ scope: group, mentionsSelf: false, fromBot: false }, [])).toBe(false);
+    expect(log.shouldStore({ scope: group, mentionsSelf: true, fromBot: false }, [])).toBe(true);
+    expect(log.shouldStore({ scope: topic, mentionsSelf: false, fromBot: false }, [])).toBe(false);
+    expect(log.shouldStore({ scope: topic, mentionsSelf: false, fromBot: false }, ["omt_1"])).toBe(true);
+  });
+});

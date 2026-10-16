@@ -10,7 +10,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && cp src/runtimes/pi/front-tools.ext.ts src/runtimes/pi/back-tools.ext.ts dist/runtimes/pi/",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.check.json --noEmit",
     "test": "vitest run",
     "start": "node dist/cli/index.js start"

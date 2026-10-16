@@ -4,7 +4,6 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { loadConfig, resolveConfig } from "../src/config.js";
 import { createDshRuntime } from "../src/runtimes/dsh/index.js";
-import { createPiRuntime } from "../src/runtimes/pi/index.js";
 
 const agents = {
   front: { runtime: "codex", instructions: "be brief" },
@@ -64,8 +63,28 @@ describe("config", () => {
     expect(loaded.agents.back.extra).toEqual({ custom: 1 });
   });
 
-  it("leaves pi and dsh unimplemented", () => {
-    expect(() => createPiRuntime()).toThrow(/not implemented/);
+  it("leaves dsh unimplemented", () => {
     expect(() => createDshRuntime()).toThrow(/not implemented/);
+  });
+
+  it("reads pi runtime, provider, and session dir", async () => {
+    const loaded = await resolveConfig(
+      {
+        owner: "feishu:ou_owner",
+        channel: { memory: {} },
+        runtimes: { pi: { provider: "openai-codex" } },
+        agents: {
+          front: { runtime: "pi", model: "gpt-6-astra", effort: "low" },
+          back: { runtime: "pi", provider: "anthropic", model: "claude" },
+        },
+      },
+      {},
+      "/home/tester",
+    );
+    expect(loaded.runtimes.pi?.provider).toBe("openai-codex");
+    expect(loaded.runtimes.pi?.sessionDir).toBe("/home/tester/.larkling/state/pi-sessions");
+    expect(loaded.agents.front.provider).toBeUndefined();
+    expect(loaded.agents.back.provider).toBe("anthropic");
+    expect(loaded.agents.back.extra).toEqual({});
   });
 });

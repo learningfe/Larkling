@@ -11,6 +11,9 @@ timezone: Asia/Shanghai
 limits: { maxConcurrentTasks: 3, maxConcurrentChecks: 1, maxConcurrentJudges: 2 }
 runtimes:
   codex: { command: codex, args: [], idleRelease: 15m, maxLiveSessions: 8 }
+  # 要用 pi 时打开下面这段，再把 agents.<front|back>.runtime 改成 pi。
+  # provider 必须写，pi 自己默认是 google。sessionDir 默认 ~/.larkling/state/pi-sessions。
+  # pi: { command: pi, provider: openai-codex, idleRelease: 15m, maxLiveSessions: 8 }
 sessions: { seedMaxTokens: 16000, compactAfterTokens: 64000 }
 
 channel:

@@ -11,6 +11,8 @@ const duration = z.string();
 const agentSchema = z
   .object({
     runtime: z.string().min(1),
+    /** Provider id for runtimes that serve several providers (pi). */
+    provider: z.string().optional(),
     model: z.string().optional(),
     light: z.object({ model: z.string().optional() }).optional(),
     instructions: z.string().optional(),
@@ -49,6 +51,11 @@ export const configFileSchema = z
         pi: z
           .object({
             command: z.string().default("pi"),
+            args: z.array(z.string()).default([]),
+            /** Default provider for agents on pi. pi itself defaults to google, so set one. */
+            provider: z.string().optional(),
+            /** Larkling-owned session directory. Default <stateDir>/pi-sessions. */
+            sessionDir: z.string().optional(),
             idleRelease: duration.default("15m"),
             maxLiveSessions: z.number().int().positive().default(8),
           })
@@ -182,6 +189,7 @@ export type ConfigFile = z.infer<typeof configFileSchema>;
 
 export interface AgentConfig {
   runtime: string;
+  provider?: string;
   model?: string;
   lightModel?: string;
   /** Literal instructions, or the contents of the configured file. */
@@ -203,7 +211,7 @@ export interface LarklingConfig {
   limits: { maxConcurrentTasks: number; maxConcurrentChecks: number; maxConcurrentJudges: number };
   runtimes: {
     codex: { command: string; args: string[]; idleReleaseMs: number; maxLiveSessions: number };
-    pi?: { command: string; idleReleaseMs: number; maxLiveSessions: number };
+    pi?: { command: string; args: string[]; provider?: string; sessionDir: string; idleReleaseMs: number; maxLiveSessions: number };
     dsh?: { socket: string; idleReleaseMs: number; maxLiveSessions: number };
   };
   sessions: { seedMaxTokens: number; compactAfterTokens: number };
@@ -258,9 +266,10 @@ export async function resolveConfig(
   const parsed = configFileSchema.parse(input);
   const baseDir = sourcePath ? resolve(sourcePath, "..") : process.cwd();
   const agent = async (value: z.infer<typeof agentSchema>): Promise<AgentConfig> => {
-    const { runtime, model, light, instructions, sandbox, cwd, effort, approvalPolicy, fast, network, ...extra } = value;
+    const { runtime, provider, model, light, instructions, sandbox, cwd, effort, approvalPolicy, fast, network, ...extra } = value;
     return {
       runtime,
+      provider,
       model,
       lightModel: light?.model,
       instructions: instructions ? await readMaybePath(instructions, baseDir, home) : "",
@@ -291,6 +300,9 @@ export async function resolveConfig(
       pi: parsed.runtimes.pi
         ? {
             command: parsed.runtimes.pi.command,
+            args: parsed.runtimes.pi.args,
+            provider: parsed.runtimes.pi.provider,
+            sessionDir: expandHome(parsed.runtimes.pi.sessionDir ?? `${expandHome(env.LARKLING_STATE_DIR || parsed.stateDir, home)}/pi-sessions`, home),
             idleReleaseMs: parseDuration(parsed.runtimes.pi.idleRelease, "runtimes.pi.idleRelease"),
             maxLiveSessions: parsed.runtimes.pi.maxLiveSessions,
           }

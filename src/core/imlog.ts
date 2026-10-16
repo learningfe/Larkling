@@ -12,8 +12,9 @@ export interface StoredMessage extends ImRecord {
 }
 
 /**
- * Messages kept for this bot: mentions, the bot's own sends, and every message
- * in a topic the bot has already joined. Platform history reads are not written back.
+ * Messages kept for this bot: every DM message, mentions, the bot's own sends,
+ * and every message in a topic the bot has already joined.
+ * Platform history reads are not written back.
  */
 export class ImLog {
   constructor(private readonly dir: string) {}
@@ -58,6 +59,7 @@ export class ImLog {
   }
 
   shouldStore(message: { scope: Scope; mentionsSelf: boolean; fromBot: boolean }, participatedTopics: string[]): boolean {
+    if (message.scope.kind === "dm") return true;
     if (message.mentionsSelf || message.fromBot) return true;
     return message.scope.kind === "topic" && participatedTopics.includes(message.scope.id);
   }

@@ -229,6 +229,14 @@ export class Host {
         }
         // The runtime process is gone. Keep runtimeRef so the next turn can resume.
         session.live = false;
+        // The configured runtime changed (e.g. codex -> pi). The old ref belongs to the other
+        // runtime, so drop it; the next turn opens a fresh session with the transcript seed.
+        const configured = session.kind === "task" ? this.config.agents.back.runtime : this.config.agents.front.runtime;
+        if (session.runtimeName !== configured) {
+          session.runtimeName = configured;
+          session.runtimeRef = undefined;
+          session.instructionsHash = undefined;
+        }
         if (session.activeTurn) {
           session.activeTurn.interruptReason = "restart";
           session.activeTurn.suppressOutbound = true;
@@ -418,6 +426,7 @@ export class Host {
       text: message.text,
       attachments: message.attachments,
       occurredAt: message.occurredAt,
+      audioPrepMs: message.audioPrepMs,
     }));
     await this.enqueue(sessionId, items);
   }
@@ -502,15 +511,34 @@ export class Host {
         return;
       }
     }
+    const prepStarted = Date.now();
+    const cold = !(session.live && session.runtimeRef);
+    let ensure: { seedMs: number; openMs: number };
     try {
-      await this.ensureRuntime(session);
+      ensure = await this.ensureRuntime(session);
     } catch (error) {
       await this.failUndelivered(sessionId, batch, error instanceof Error ? error.message : String(error));
       return;
     }
+    const ensureRuntimeMs = Date.now() - prepStarted;
+    const buildStarted = Date.now();
     const built = await this.buildTurn(sessionId, batch);
+    const buildTurnMs = Date.now() - buildStarted;
     const turnId = newId();
     const input: TurnInput = { ...built.input, turnId };
+    const audioMs = batch.reduce((sum, item) => sum + (item.kind === "message" ? item.audioPrepMs ?? 0 : 0), 0);
+    this.log.info("turn.prep", {
+      sessionId,
+      turnId,
+      cold,
+      ensureRuntimeMs,
+      seedMs: ensure.seedMs,
+      openMs: ensure.openMs,
+      buildTurnMs,
+      historyMs: built.historyMs,
+      audioMs,
+      totalMs: Date.now() - prepStarted,
+    });
     const messageIds = batch.flatMap((item) => (item.kind === "message" ? [item.messageId] : []));
     const now = this.iso();
     const turn: ActiveTurn = {
@@ -1051,22 +1079,27 @@ export class Host {
     return promise;
   }
 
-  private async ensureRuntime(session: SessionRecord): Promise<void> {
+  private async ensureRuntime(session: SessionRecord): Promise<{ seedMs: number; openMs: number }> {
     const runtime = this.runtimeFor(session);
     if (this.disabled.has(runtime.name)) throw new Error(`runtime ${runtime.name} is disabled`);
-    if (session.live && session.runtimeRef) return;
+    if (session.live && session.runtimeRef) return { seedMs: 0, openMs: 0 };
     await this.evict(runtime, session.sessionId);
     const instructions = this.instructionsFor(session.kind);
     const hash = sha256(instructions);
     const profile = this.profileFor(session.kind);
+    let seedMs = 0;
+    let openMs = 0;
     const openNew = async (seedText?: Awaited<ReturnType<typeof buildSeed>>) => {
+      const openStarted = Date.now();
       const ref = await runtime.open({
         sessionId: session.sessionId,
         kind: session.kind,
         seed: seedText && seedText.text ? seedText : undefined,
         profile,
         instructions,
+        toolEnv: this.toolEnvFor(session),
       });
+      openMs += Date.now() - openStarted;
       const now = this.iso();
       await this.stateStore.update((draft) => {
         const current = draft.sessions[session.sessionId];
@@ -1082,13 +1115,15 @@ export class Host {
       const updated = await runtime.updateInstructions(session.runtimeRef, instructions);
       if (updated === "unsupported") {
         await runtime.release(session.runtimeRef).catch(() => undefined);
+        const seedStarted = Date.now();
         const seed = await this.seedFor(session.sessionId);
+        seedMs += Date.now() - seedStarted;
         await this.stateStore.update((draft) => {
           draft.sessions[session.sessionId].runtimeRef = undefined;
         });
         session.runtimeRef = undefined;
         await openNew(seed);
-        return;
+        return { seedMs, openMs };
       }
       await this.stateStore.update((draft) => {
         draft.sessions[session.sessionId].instructionsHash = hash;
@@ -1096,13 +1131,16 @@ export class Host {
     }
     if (session.runtimeRef) {
       try {
+        const openStarted = Date.now();
         const ref = await runtime.open({
           sessionId: session.sessionId,
           kind: session.kind,
           runtimeRef: session.runtimeRef,
           profile,
           instructions,
+          toolEnv: this.toolEnvFor(session),
         });
+        openMs += Date.now() - openStarted;
         const now = this.iso();
         await this.stateStore.update((draft) => {
           const current = draft.sessions[session.sessionId];
@@ -1112,19 +1150,24 @@ export class Host {
           current.idleSince = now;
           current.lastUsedAt = now;
         });
-        return;
+        return { seedMs, openMs };
       } catch {
+        const seedStarted = Date.now();
         const seed = await this.seedFor(session.sessionId);
+        seedMs += Date.now() - seedStarted;
         await this.stateStore.update((draft) => {
           draft.sessions[session.sessionId].runtimeRef = undefined;
         });
         session.runtimeRef = undefined;
         await openNew(seed);
-        return;
+        return { seedMs, openMs };
       }
     }
+    const seedStarted = Date.now();
     const seed = session.lastSeq > 0 ? await this.seedFor(session.sessionId) : undefined;
+    seedMs += Date.now() - seedStarted;
     await openNew(seed);
+    return { seedMs, openMs };
   }
 
   private async evict(runtime: RuntimeAdapter, keepId: string): Promise<void> {
@@ -1146,7 +1189,7 @@ export class Host {
     });
   }
 
-  private async buildTurn(sessionId: string, batch: QueuedInput[]): Promise<{ input: TurnInput }> {
+  private async buildTurn(sessionId: string, batch: QueuedInput[]): Promise<{ input: TurnInput; historyMs: number }> {
     const session = this.must(sessionId);
     const token = session.token;
     if (session.kind === "task") {
@@ -1155,18 +1198,31 @@ export class Host {
       return {
         input: {
           turnId: "",
-          context: taskContext({ body: task?.body || prompt, apiUrl: this.apiUrl, token, parentContainer: session.imContainer, cli: this.cli }),
+          context: taskContext({
+            body: task?.body || prompt,
+            apiUrl: this.apiUrl,
+            token,
+            parentContainer: session.imContainer,
+            cli: this.cli,
+            taskId: task?.taskId ?? session.taskId,
+            version: task?.version,
+            backTaskTools: session.runtimeName === "pi",
+          }),
           messages: [{ text: prompt }],
         },
+        historyMs: 0,
       };
     }
     const scope = session.scope;
     const messages = batch.filter((item): item is Extract<QueuedInput, { kind: "message" }> => item.kind === "message");
     const records = messages.map((message) => this.recordFromQueued(message, scope));
     let window: ImRecord[] = records;
+    let historyMs = 0;
     if (scope && (scope.kind === "dm" || this.channel.capabilities.readGroupMessages)) {
+      const historyStarted = Date.now();
       const fetched = await this.safeHistory(scope, scope.kind === "topic" ? this.config.im.window.topic : this.config.im.window.group);
       const stored = await this.imlog.load(scope.id);
+      historyMs = Date.now() - historyStarted;
       const merged = new Map<string, ImRecord>();
       for (const item of fetched) merged.set(item.messageId, item);
       for (const item of stored) merged.set(item.messageId, item);
@@ -1206,6 +1262,7 @@ export class Host {
           token,
           sessionId,
           cli: this.cli,
+          frontTaskTools: session.runtimeName === "pi",
         })
       : "";
     const renderedIds = new Set(scope ? windowIds : []);
@@ -1222,7 +1279,7 @@ export class Host {
       } else if (item.kind === "task_event") inputMessages.push({ text: item.text });
       else inputMessages.push({ text: item.text });
     }
-    return { input: { turnId: "", context, messages: inputMessages } };
+    return { input: { turnId: "", context, messages: inputMessages }, historyMs };
   }
 
   private async downloadImages(attachments: AttachmentRef[]): Promise<{ path: string; name?: string }[]> {
@@ -1623,10 +1680,18 @@ export class Host {
     return withFile(frontInstructions(persona, duty, name), this.config.agents.front.instructions);
   }
 
+  /** Env for front tools (task_start / task_cancel). Only conversation sessions on pi use them. */
+  private toolEnvFor(session: SessionRecord): Record<string, string> | undefined {
+    if (session.runtimeName !== "pi") return undefined;
+    if (session.kind !== "conversation" && session.kind !== "task") return undefined;
+    return { LARKLING_API_URL: this.apiUrl, LARKLING_SESSION_TOKEN: session.token };
+  }
+
   private profileFor(kind: SessionKind) {
     const agent = kind === "task" ? this.config.agents.back : this.config.agents.front;
     const light = kind === "check" || kind === "judge" || kind === "compact";
     return {
+      provider: agent.provider,
       model: light ? agent.lightModel ?? agent.model : agent.model,
       effort: light ? undefined : agent.effort,
       sandbox: light ? "read-only" : agent.sandbox,

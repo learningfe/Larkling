@@ -1,6 +1,13 @@
+import { join } from "node:path";
+import { readFile } from "node:fs/promises";
+import { Logger } from "../src/log.js";
+import { ManualClock } from "../src/core/clock.js";
+import { ScriptedRuntime } from "../src/runtimes/scripted.js";
+import { MemoryChannel } from "../src/channels/memory.js";
+import { createHost } from "../src/core/host.js";
 import { describe, expect, it } from "vitest";
 import { conversationSessionId } from "../src/protocol/types.js";
-import { groupScope, message, ownerActor, OWNER_ID, post, pushAndSettle, startHarness, waitFor, type Harness } from "./helpers.js";
+import { OWNER_ID, groupScope, message, ownerActor, post, pushAndSettle, startHarness, tempDir, testConfig, type Harness, waitFor } from "./helpers.js";
 
 function conversation(h: Harness, id = "ou_owner") {
   return h.host.snapshot().sessions[conversationSessionId({ channel: "memory", kind: "dm", id })];
@@ -389,4 +396,46 @@ describe("in-memory channel and scripted runtime", () => {
       approvalPolicy: "never",
     });
   });
+
+  it("stores every DM in imlog and logs turn.prep cold then warm", async () => {
+    const dir = await tempDir();
+    const config = await testConfig(dir);
+    const clock = new ManualClock(Date.parse("2026-03-15T02:00:00.000Z"));
+    const channel = new MemoryChannel(true);
+    const runtime = new ScriptedRuntime("codex");
+    runtime.handler = async (turn) => turn.emit({ type: "turn.completed", text: "pong" });
+    const host = await createHost({
+      config,
+      channel,
+      runtimes: new Map([["codex", runtime]]),
+      clock,
+      logger: new Logger(join(dir, "log.jsonl"), "info"),
+      bot: { ref: "ou_bot", stableId: "memory:bot", name: "Larkling" },
+      timers: false,
+    });
+    await host.start();
+    channel.push(message({ text: "ping", messageId: "dm1", mentionsSelf: false }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await host.settle();
+    const { ImLog } = await import("../src/core/imlog.js");
+    const log = new ImLog(dir);
+    const stored = await log.load("ou_owner");
+    expect(stored.some((item) => item.messageId === "dm1" && !item.fromBot)).toBe(true);
+    expect(stored.some((item) => item.fromBot && item.text === "pong")).toBe(true);
+    const lines = (await readFile(join(dir, "log.jsonl"), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    const preps = lines.filter((line) => line.event === "turn.prep");
+    expect(preps.length).toBeGreaterThanOrEqual(1);
+    expect(preps[0]).toMatchObject({ cold: true });
+    for (const key of ["ensureRuntimeMs", "seedMs", "openMs", "buildTurnMs", "historyMs", "audioMs", "totalMs"] as const) {
+      expect(typeof preps[0][key]).toBe("number");
+    }
+    channel.push(message({ text: "again", messageId: "dm2", mentionsSelf: false }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await host.settle();
+    const lines2 = (await readFile(join(dir, "log.jsonl"), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    const preps2 = lines2.filter((line) => line.event === "turn.prep");
+    expect(preps2.at(-1)).toMatchObject({ cold: false, openMs: 0, seedMs: 0 });
+    await host.stop();
+  });
+
 });

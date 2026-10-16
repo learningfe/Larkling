@@ -9,7 +9,7 @@ import { startFeishuSocket } from "../channels/feishu/ws.js";
 import { MemoryChannel } from "../channels/memory.js";
 import { CodexRuntime } from "../runtimes/codex/adapter.js";
 import { createDshRuntime } from "../runtimes/dsh/index.js";
-import { createPiRuntime } from "../runtimes/pi/index.js";
+import { PiRuntime } from "../runtimes/pi/adapter.js";
 import { StateStore } from "../core/state.js";
 import { Logger } from "../log.js";
 import type { RuntimeAdapter } from "../protocol/types.js";
@@ -280,7 +280,11 @@ function buildRuntimes(config: LarklingConfig): Map<string, RuntimeAdapter> {
       runtimes.set("codex", new CodexRuntime({ command: config.runtimes.codex.command, args: config.runtimes.codex.args }));
       continue;
     }
-    if (name === "pi") createPiRuntime();
+    if (name === "pi") {
+      const pi = config.runtimes.pi ?? { command: "pi", args: [] as string[], provider: undefined, sessionDir: join(config.stateDir, "pi-sessions") };
+      runtimes.set("pi", new PiRuntime({ command: pi.command, args: pi.args, provider: pi.provider, sessionDir: pi.sessionDir }));
+      continue;
+    }
     if (name === "dsh") createDshRuntime();
     throw new Error(`runtime ${name} is not registered`);
   }

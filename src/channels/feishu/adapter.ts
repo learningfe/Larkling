@@ -298,6 +298,7 @@ export class FeishuChannel implements ChannelAdapter {
       disposition: normalized.disposition,
       replyTo: message.parent_id || undefined,
       occurredAt,
+      audioPrepMs: normalized.audioPrepMs,
     });
     return events;
   }
@@ -307,8 +308,11 @@ export class FeishuChannel implements ChannelAdapter {
     const mentions = (message.mentions ?? []) as FeishuMention[];
     const msgType = message.msg_type || message.message_type || "";
     let audio: { durationMs: number; transcript?: string; status: "ok" | "too_long" | "failed" } | undefined;
+    let audioPrepMs: number | undefined;
     if (msgType === "audio") {
+      const started = Date.now();
       audio = await this.prepareAudio(message);
+      audioPrepMs = Date.now() - started;
     }
     const result = await normalizeFeishuMessage(message, {
       messageId,
@@ -345,7 +349,7 @@ export class FeishuChannel implements ChannelAdapter {
       occurredAt: millisToIso(String(message.create_time ?? Date.now())),
       replyTo: message.parent_id || undefined,
     };
-    return { record, mentionsSelf: result.mentionsSelf, mentionsOthers: result.mentionsOthers, disposition: result.disposition, names: result.names, senderName };
+    return { record, mentionsSelf: result.mentionsSelf, mentionsOthers: result.mentionsOthers, disposition: result.disposition, names: result.names, senderName, audioPrepMs };
   }
 
   private async prepareAudio(message: FeishuRawMessage): Promise<{ durationMs: number; transcript?: string; status: "ok" | "too_long" | "failed" }> {

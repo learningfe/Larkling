@@ -12,5 +12,11 @@
     "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["src"]
+  "include": [
+    "src"
+  ],
+  "exclude": [
+    "src/runtimes/pi/front-tools.ext.ts",
+    "src/runtimes/pi/back-tools.ext.ts"
+  ]
 }

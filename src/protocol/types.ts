@@ -67,6 +67,8 @@ export interface MessageEvent {
   disposition?: MessageDisposition;
   replyTo?: string;
   occurredAt: string;
+  /** Wall time spent preparing this message before enqueue (e.g. Feishu speech-to-text). */
+  audioPrepMs?: number;
 }
 
 export type ChannelEvent =
@@ -136,6 +138,8 @@ export type FinalReply = { kind: "text"; text: string } | { kind: "silent" };
 export type RuntimeRef = string;
 
 export interface RuntimeProfile {
+  /** LLM provider id, used by runtimes such as pi that serve several providers. */
+  provider?: string;
   model?: string;
   effort?: string;
   sandbox?: string;
@@ -161,6 +165,8 @@ export interface SessionSpec {
   seed?: Seed;
   profile: RuntimeProfile;
   instructions: string;
+  /** Env vars the runtime should pass to the child (e.g. task API url and session token for front tools). */
+  toolEnv?: Record<string, string>;
 }
 
 export interface InputImage {
@@ -301,6 +307,8 @@ export type QueuedInput =
       text: string;
       attachments: AttachmentRef[];
       occurredAt: string;
+      /** Wall time spent preparing audio for this message, when present. */
+      audioPrepMs?: number;
     }
   | { kind: "task_event"; taskId: string; reason: TaskEvent["reason"]; text: string; at: string }
   | { kind: "prompt"; text: string };

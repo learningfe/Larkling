@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { conversationSessionId } from "../src/protocol/types.js";
 import { message, pushAndSettle, startHarness, waitFor } from "./helpers.js";
+import { createHost } from "../src/core/host.js";
+import { MemoryChannel } from "../src/channels/memory.js";
+import { ScriptedRuntime } from "../src/runtimes/scripted.js";
+import { Logger } from "../src/log.js";
 
 describe("session lifecycle", () => {
   it("releases an idle conversation and reseeds when instructions cannot be updated", async () => {
@@ -39,6 +43,26 @@ describe("session lifecycle", () => {
     await pushAndSettle(h, message({ text: "again", messageId: "m2" }));
     expect(h.runtime.instructionUpdates.at(-1)?.instructions).toContain("rewritten");
     expect(h.runtime.opens.at(-1)?.runtimeRef).toBe(ref);
+  });
+
+  it("moves saved sessions to a newly configured runtime and reseeds", async () => {
+    const h = await startHarness();
+    h.runtime.handler = async (turn) => turn.emit({ type: "turn.completed", text: "ok" });
+    await pushAndSettle(h, message({ text: "hello", messageId: "m1" }));
+    await h.host.stop();
+    const config = { ...h.config, agents: { front: { ...h.config.agents.front, runtime: "pi" }, back: { ...h.config.agents.back, runtime: "pi" } } };
+    const pi = new ScriptedRuntime("pi");
+    pi.handler = async (turn) => turn.emit({ type: "turn.completed", text: "from pi" });
+    const channel = new MemoryChannel(true);
+    const host = await createHost({ config, channel, runtimes: new Map([["pi", pi]]), clock: h.clock, logger: new Logger(undefined, "error"), bot: { ref: "ou_bot", stableId: "memory:bot", name: "Larkling" }, timers: false });
+    await host.start();
+    channel.push(message({ text: "again", messageId: "m2" }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await host.settle();
+    expect(pi.opens.at(-1)?.runtimeRef).toBeUndefined();
+    expect(pi.opens.at(-1)?.seed?.text).toContain("hello");
+    expect(channel.sent.at(-1)?.action).toMatchObject({ type: "text", text: "from pi" });
+    await host.stop();
   });
 
   it("reseeds when resuming a saved runtime ref fails", async () => {
