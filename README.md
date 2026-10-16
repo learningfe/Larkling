@@ -21,6 +21,14 @@ src/cli/          larkling 命令
 
 本地目录缓存在状态目录的 `directory.json`：人按 `open_id` 存名字和所在群（视为可信，30 天后仍先用旧值、后台刷新），群按 `chat_id` 存群名和最近活跃时间。群名靠订阅飞书事件 `im.chat.updated_v1` 更新（需要在开发者后台订阅该事件），不轮询；第一次见到某个群时调一次 `GET /open-apis/im/v1/chats/:chat_id` 补群名。缓存里找不到人时，按最近活跃顺序每批并发 20 个群拉群成员（走同一个限流器），找到就停，见到的成员都写进缓存。不使用通讯录接口。只有后台能查：pi 上是 `person_lookup` / `group_lookup` 工具，Codex 上是 `larkling person lookup` / `larkling group lookup` 命令，背后都是 `POST /v1/person/lookup`、`POST /v1/group/lookup`。前台不查人，要拉进不在上下文里的人时交给后台。原来的 `im who` 已去掉。
 
+## 信任
+
+入口只决定这条消息能不能进会话，不决定要不要回复。群里仍按 `im.respondTo` 和 Gate 处理：默认要 @，配成 `relevant` 才做相关性判断。`session.botChainLimit` 只截断同一个会话里连续的机器人互聊，不是信任拒绝。
+
+`owner` 在任何会话里都放行。`trust.trusted` 和 `trust.allowed` 合成一份个人白名单，入口规则相同，返回的角色标签仍分开。私聊，以及没有父群的话题，只认所有者和这份白名单。普通群和来自群的话题默认开放：没被点名的人和机器人都是 `allowed`。写进 `trust.restricted` 的 chat id 收紧到个人白名单；话题跟随父群，父群或话题自己的 id 在名单里都算锁住。`restricted` 为空时，所有群都开放。
+
+升级时删掉原来的 `trust.groups`。那个字段是开放群白名单，和现在的含义相反，不要把里面的 chat id 抄进 `trust.restricted`。删掉之后，以前没写进 `groups` 的群也会变成开放；只有确实要锁住的群，才把它的 chat id 写进 `restricted`。配置里再出现 `trust.groups` 会直接被拒绝。
+
 ## 命令
 
 ```
@@ -62,7 +70,7 @@ npm test
    npm run build
    ```
 
-5. 把 `examples/config.yaml` 复制到 `~/.larkling/config.yaml`。`owner` 写成 `feishu:` 加上你自己的 `open_id`。`appId` 换成应用的 App ID。模型换成你的 Codex 账号支持的名字，示例里是 `gpt-6.1-sol` 和 `gpt-6-luna`。
+5. 把 `examples/config.yaml` 复制到 `~/.larkling/config.yaml`。`owner` 写成 `feishu:` 加上你自己的 `open_id`。`appId` 换成应用的 App ID。模型换成你的 Codex 账号支持的名字，示例里是 `gpt-6.1-sol` 和 `gpt-6-luna`。群默认开放。要锁住某个群，把 chat id 写进 `trust.restricted`。不要再写 `trust.groups`。
 6. 导出密钥并检查配置：
 
    ```bash

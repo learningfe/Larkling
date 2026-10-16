@@ -50,17 +50,71 @@ describe("delivery table", () => {
 });
 
 describe("trust", () => {
-  it("lets group humans inherit the parent chat and keeps unlisted bots denied", async () => {
+  const human = { channel: "memory", ref: "ou_x", stableId: "feishu:on_stranger", name: "X", isBot: false };
+  const bot = { channel: "memory", ref: "ou_b", stableId: "feishu:on_bot", name: "B", isBot: true };
+  const allowed = { ...human, ref: "ou_a", stableId: "feishu:on_allowed", name: "A" };
+  const trusted = { ...human, ref: "ou_t", stableId: "feishu:on_trusted", name: "T" };
+  const owner = { ...human, ref: "ou_owner", stableId: OWNER_ID, name: "Owner" };
+  const openGroup = { channel: "memory" as const, kind: "group" as const, id: "oc_family" };
+  const lockedGroup = { channel: "memory" as const, kind: "group" as const, id: "oc_locked" };
+  const dm = { channel: "memory" as const, kind: "dm" as const, id: "ou_x" };
+  const openTopic = { channel: "memory" as const, kind: "topic" as const, id: "omt_open", parentId: "oc_family" };
+  const lockedTopic = { channel: "memory" as const, kind: "topic" as const, id: "omt_locked", parentId: "oc_locked" };
+
+  it("allows unlisted humans and bots in an ordinary group and its topics", async () => {
+    const config = await testConfig(await tempDir());
+    expect(resolveTrust(human, openGroup, config)).toBe("allowed");
+    expect(resolveTrust(bot, openGroup, config)).toBe("allowed");
+    expect(resolveTrust(human, openTopic, config)).toBe("allowed");
+    expect(resolveTrust(bot, openTopic, config)).toBe("allowed");
+    expect(resolveTrust(trusted, openGroup, config)).toBe("trusted");
+    expect(resolveTrust(owner, openGroup, config)).toBe("owner");
+  });
+
+  it("keeps a restricted group and its topics on the personal allowlist", async () => {
     const config = await testConfig(await tempDir(), (draft) => {
-      draft.trust.groups = ["oc_family"];
+      draft.trust.restricted = ["oc_locked"];
     });
-    const human = { channel: "memory", ref: "ou_x", stableId: "feishu:on_stranger", name: "X", isBot: false };
-    const bot = { channel: "memory", ref: "ou_b", stableId: "feishu:on_bot", name: "B", isBot: true };
-    expect(resolveTrust(human, { channel: "memory", kind: "group", id: "oc_family" }, config)).toBe("allowed");
-    expect(resolveTrust(human, { channel: "memory", kind: "topic", id: "omt_1", parentId: "oc_family" }, config)).toBe("allowed");
-    expect(resolveTrust(human, { channel: "memory", kind: "dm", id: "ou_x" }, config)).toBe("denied");
-    expect(resolveTrust(bot, { channel: "memory", kind: "group", id: "oc_family" }, config)).toBe("denied");
-    expect(resolveTrust({ ...human, stableId: OWNER_ID }, undefined, config)).toBe("owner");
+    expect(resolveTrust(human, lockedGroup, config)).toBe("denied");
+    expect(resolveTrust(bot, lockedGroup, config)).toBe("denied");
+    expect(resolveTrust(allowed, lockedGroup, config)).toBe("allowed");
+    expect(resolveTrust(trusted, lockedGroup, config)).toBe("trusted");
+    expect(resolveTrust(owner, lockedGroup, config)).toBe("owner");
+    expect(resolveTrust(human, lockedTopic, config)).toBe("denied");
+    expect(resolveTrust(bot, lockedTopic, config)).toBe("denied");
+    expect(resolveTrust(allowed, lockedTopic, config)).toBe("allowed");
+    expect(resolveTrust(trusted, lockedTopic, config)).toBe("trusted");
+    expect(resolveTrust(owner, lockedTopic, config)).toBe("owner");
+    expect(resolveTrust(human, openGroup, config)).toBe("allowed");
+    expect(resolveTrust(bot, openTopic, config)).toBe("allowed");
+  });
+
+  it("authorizes DMs only for the owner and the personal allowlist", async () => {
+    const config = await testConfig(await tempDir(), (draft) => {
+      draft.trust.restricted = ["oc_locked"];
+    });
+    expect(resolveTrust(human, dm, config)).toBe("denied");
+    expect(resolveTrust(bot, dm, config)).toBe("denied");
+    expect(resolveTrust(allowed, dm, config)).toBe("allowed");
+    expect(resolveTrust(trusted, dm, config)).toBe("trusted");
+    expect(resolveTrust(owner, dm, config)).toBe("owner");
+    expect(resolveTrust(owner, undefined, config)).toBe("owner");
+    expect(resolveTrust(human, undefined, config)).toBe("denied");
+    const orphan = { channel: "memory" as const, kind: "topic" as const, id: "omt_orphan" };
+    expect(resolveTrust(human, orphan, config)).toBe("denied");
+    expect(resolveTrust(bot, orphan, config)).toBe("denied");
+    expect(resolveTrust(allowed, orphan, config)).toBe("allowed");
+  });
+
+  it("locks a topic whose own id is restricted even when the parent group is open", async () => {
+    const config = await testConfig(await tempDir(), (draft) => {
+      draft.trust.restricted = ["omt_named"];
+    });
+    const topic = { channel: "memory" as const, kind: "topic" as const, id: "omt_named", parentId: "oc_family" };
+    expect(resolveTrust(human, topic, config)).toBe("denied");
+    expect(resolveTrust(bot, topic, config)).toBe("denied");
+    expect(resolveTrust(allowed, topic, config)).toBe("allowed");
+    expect(resolveTrust(human, openGroup, config)).toBe("allowed");
   });
 });
 
