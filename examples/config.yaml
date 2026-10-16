@@ -1,0 +1,72 @@
+# 复制到 ~/.larkling/config.yaml 后按自己的应用改。
+# appSecret 只能写 env:变量名，明文会被拒绝。
+# 以 ./ ../ / ~ 开头的 instructions、soul、local 会按文件读取，文件必须存在。
+#
+# 模型必须是当前 Codex 账号实际支持的。ChatGPT 登录的账号常见可用：
+# 主模型 gpt-6.1-sol，轻量 gpt-6-luna。PATH 上较旧的 codex 可能不认识这些模型，
+# 把 runtimes.codex.command 写成新二进制的路径即可。
+
+stateDir: ~/.larkling/state
+timezone: Asia/Shanghai
+limits: { maxConcurrentTasks: 3, maxConcurrentChecks: 1, maxConcurrentJudges: 2 }
+runtimes:
+  codex: { command: codex, args: [], idleRelease: 15m, maxLiveSessions: 8 }
+  # 要用 pi 时打开下面这段，再把 agents.<front|back>.runtime 改成 pi。
+  # provider 必须写，pi 自己默认是 google。sessionDir 默认 ~/.larkling/state/pi-sessions。
+  # pi: { command: pi, provider: openai-codex, idleRelease: 15m, maxLiveSessions: 8 }
+sessions: { seedMaxTokens: 16000, compactAfterTokens: 64000 }
+
+channel:
+  feishu:
+    appId: cli_xxx
+    appSecret: env:LARKLING_APP_SECRET
+    readGroupMessages: false
+    rateLimit: { perSecond: 20 }
+    speechRatePerSecond: 20
+    domain: https://open.feishu.cn
+
+# 身份主键是 open_id：feishu:ou_xxx。union_id 只作为附加引用，不能写在这里。
+owner: feishu:ou_xxx
+trust:
+  trusted: []
+  allowed: []
+  groups: []
+
+im:
+  # maxAge 会丢掉更早的历史，默认 24 小时，另外还受条数和 token 限制。
+  window: { group: 20, topic: 20, maxTokens: 4000, maxAge: 24h }
+  respondTo: { default: mention, scopes: {} }
+  gate: { debounce: 5s, judgeContext: 10 }
+
+persona:
+  # 不写 name 时，启动后用机器人在飞书里的应用名称。
+  # name: 小灵
+  duty: ""
+
+session: { turnIdleTimeout: 15m, botChainLimit: 3 }
+agents:
+  front:
+    runtime: codex
+    model: gpt-6.1-sol
+    # fast 为 true 时这一侧的回合走更快的服务档位，默认 false。轻量回合沿用同一个开关。
+    fast: false
+    # network 为 true 时沙箱里的命令可以访问网络，默认 false。轻量回合不打开网络。
+    network: false
+    # 不写 cwd 时，前台工作目录是 ~/.larkling/state/front。
+    # cwd: ~/work
+    light: { model: gpt-6-luna }
+    sandbox: read-only
+    instructions: 简洁、直接，只说你能核对的事实。
+  back:
+    runtime: codex
+    model: gpt-6.1-sol
+    fast: false
+    network: false
+    effort: high
+    sandbox: workspace-write
+    approvalPolicy: on-request
+    instructions: 按任务正文推进，做完就停，不要自己扩大范围。
+tasks:
+  enabled: true
+  taskIdleTimeout: 60m
+  heartbeat: { enabled: true, scanInterval: 30s, interval: 30m }

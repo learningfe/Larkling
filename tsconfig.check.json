@@ -1,0 +1,15 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "noEmit": true
+  },
+  "include": [
+    "src",
+    "test"
+  ],
+  "exclude": [
+    "src/runtimes/pi/front-tools.ext.ts",
+    "src/runtimes/pi/back-tools.ext.ts"
+  ]
+}
