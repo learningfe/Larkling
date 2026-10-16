@@ -56,8 +56,20 @@ export async function imFileRequest(apiUrl: string, token: string, body: { messa
   return post(apiUrl, token, "/v1/im/file", body);
 }
 
-export async function imWhoRequest(apiUrl: string, token: string, name: string): Promise<AgentToolHttpResult> {
-  return post(apiUrl, token, "/v1/im/who", { name });
+export async function personLookupRequest(
+  apiUrl: string,
+  token: string,
+  body: { openId?: string; query?: string; scope?: "current" | "all" },
+): Promise<AgentToolHttpResult> {
+  return post(apiUrl, token, "/v1/person/lookup", body);
+}
+
+export async function groupLookupRequest(
+  apiUrl: string,
+  token: string,
+  body: { chatId?: string; query?: string; includeMembers?: boolean },
+): Promise<AgentToolHttpResult> {
+  return post(apiUrl, token, "/v1/group/lookup", body);
 }
 
 async function post(apiUrl: string, token: string, path: string, body: Record<string, unknown>): Promise<AgentToolHttpResult> {

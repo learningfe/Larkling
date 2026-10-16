@@ -65,3 +65,16 @@ describe("commandsBlock", () => {
     expect(without).toContain("task cancel");
   });
 });
+
+describe("directory prompts", async () => {
+  const { frontInstructions, backInstructions } = await import("../src/tasks/prompts.js");
+  it("gives lookups to back only", () => {
+    const front = (frontInstructions as (...a: unknown[]) => string)("p", "", "bot");
+    const back = backInstructions("p", "");
+    expect(front).not.toMatch(/person_lookup|who command/);
+    expect(front).toContain("叫上小赵");
+    expect(back).toContain("person_lookup");
+    expect(back).toContain("group_lookup");
+    expect(back).toContain("ask the user which one");
+  });
+});

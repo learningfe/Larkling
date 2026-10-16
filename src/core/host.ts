@@ -42,6 +42,7 @@ import { Gate } from "./gate.js";
 import { ImLog, type StoredMessage } from "./imlog.js";
 import { KeyedLock } from "./lock.js";
 import { PersonDirectory } from "./persons.js";
+import { Directory } from "./directory.js";
 import { StateStore } from "./state.js";
 import { TranscriptStore } from "./transcript.js";
 import { resolveTrust, trustAtLeast } from "./trust.js";
@@ -108,6 +109,7 @@ export class Host {
   private readonly historyMarks = new Map<string, HistoryMark>();
   private stateStore!: StateStore;
   private persons!: PersonDirectory;
+  private directory!: Directory;
   private transcripts!: TranscriptStore;
   private imlog!: ImLog;
   private bot: BotIdentity;
@@ -139,6 +141,11 @@ export class Host {
     await mkdir(join(this.config.stateDir, "files"), { recursive: true });
     this.stateStore = await StateStore.open(this.config.stateDir);
     this.persons = await PersonDirectory.open(this.config.stateDir);
+    this.directory = await Directory.open(this.config.stateDir);
+    const channel = this.channel;
+    if (channel.chatInfo && channel.chatMembers) {
+      this.directory.attach({ chatInfo: (id) => channel.chatInfo!(id), chatMembers: (id) => channel.chatMembers!(id) });
+    }
     this.transcripts = new TranscriptStore(this.config.stateDir);
     this.imlog = new ImLog(this.config.stateDir);
     this.readParticipated = () => this.stateStore.get().participatedTopics;
@@ -153,7 +160,8 @@ export class Host {
       taskCancel: (token, taskId) => this.taskCancel(token, taskId),
       imHistory: (token, body) => this.imHistory(token, body),
       imFile: (token, body) => this.imFile(token, body),
-      imWho: (token, body) => this.imWho(token, body),
+      personLookup: (token, body) => this.personLookup(token, body),
+      groupLookup: (token, body) => this.groupLookup(token, body),
     });
     this.apiUrl = api.url;
     this.apiClose = api.close;
@@ -346,6 +354,10 @@ export class Host {
       for (const entry of event.entries) await this.persons.observeName(entry, this.iso());
       return;
     }
+    if (event.type === "chat_updated") {
+      if (event.name) await this.directory.setGroupName(event.chatId, event.name);
+      return;
+    }
     if (event.type !== "message") {
       const seen = await this.markEvent(event.type === "approval_decision" ? `approval:${event.approvalId}:${event.decision}` : event.eventId);
       if (!seen) return;
@@ -373,6 +385,7 @@ export class Host {
     });
     if (!newMessage) return;
     await this.persons.observe(event.actor, event.occurredAt);
+    await this.observeDirectory(event);
     const trust = resolveTrust(event.actor, event.scope, this.config);
     const fromBot = event.actor.stableId === this.bot.stableId || (event.actor.isBot && event.actor.ref === this.bot.ref);
     this.rememberAttachments(event.messageId, event.attachments);
@@ -1561,13 +1574,43 @@ export class Host {
     }
   }
 
-  async imWho(token: string, body: { name: string }): Promise<unknown> {
-    this.authorize(token);
-    return this.persons.findByName(body.name).map((person) => ({
-      personId: person.personId,
-      names: person.names,
-      identities: person.identities,
-    }));
+  async personLookup(token: string, body: { openId?: string; query?: string; scope?: "current" | "all" }): Promise<unknown> {
+    const auth = this.authorizeBack(token);
+    if (!body.openId && !body.query?.trim()) throw new ApiError("BAD_REQUEST", "pass openId or query");
+    if (body.scope && body.scope !== "current" && body.scope !== "all") throw new ApiError("BAD_REQUEST", "scope must be current or all");
+    return this.directory.lookupPerson({ openId: body.openId, query: body.query, scope: body.scope, currentGroup: this.groupFor(auth) });
+  }
+
+  async groupLookup(token: string, body: { chatId?: string; query?: string; includeMembers?: boolean }): Promise<unknown> {
+    this.authorizeBack(token);
+    if (!body.chatId && !body.query?.trim()) throw new ApiError("BAD_REQUEST", "pass chatId or query");
+    return this.directory.lookupGroup({ chatId: body.chatId, query: body.query, includeMembers: body.includeMembers === true });
+  }
+
+  /** Directory lookups belong to background work; front sessions do not get them. */
+  private authorizeBack(token: string): TokenRecord {
+    const auth = this.authorize(token);
+    if (auth.role === "session") throw new ApiError("FORBIDDEN", "lookups are for background work", 403);
+    return auth;
+  }
+
+  private groupFor(auth: TokenRecord): string | undefined {
+    const session = this.stateStore.get().sessions[auth.sessionId];
+    return [session?.scope?.parentId, session?.scope?.id, session?.imContainer].find((id): id is string => Boolean(id?.startsWith("oc_")));
+  }
+
+  /** Passive cache upkeep from inbound messages and mentions. Never blocks on errors. */
+  private async observeDirectory(event: MessageEvent): Promise<void> {
+    const chatId = event.scope.kind === "topic" ? event.scope.parentId : event.scope.kind === "group" ? event.scope.id : undefined;
+    try {
+      if (chatId) void this.directory.touchGroup(chatId).catch(() => undefined);
+      if (event.actor.ref !== this.bot.ref && event.actor.name) await this.directory.observePerson(event.actor.ref, event.actor.name, chatId);
+      for (const mention of event.mentions ?? []) {
+        if (mention.ref !== this.bot.ref) await this.directory.observePerson(mention.ref, mention.name, chatId);
+      }
+    } catch (error) {
+      this.log.warn("directory.observe_failed", { error: String(error) });
+    }
   }
 
   private authorize(token: string): TokenRecord {

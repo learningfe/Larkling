@@ -91,7 +91,9 @@ export type ChannelEvent =
       actor: Actor;
       decision: "approve" | "deny";
     }
-  | { type: "names"; entries: { stableId: string; ref: string; name: string }[] };
+  | { type: "names"; entries: { stableId: string; ref: string; name: string }[] }
+  /** Group info changed (Feishu `im.chat.updated_v1`). */
+  | { type: "chat_updated"; chatId: string; name?: string };
 
 export type SessionKind = "conversation" | "task" | "check" | "judge" | "compact";
 
@@ -272,6 +274,10 @@ export interface ChannelAdapter {
   }): Promise<ImRecord[]>;
   download(ref: AttachmentRef): Promise<string>;
   health(): Promise<HealthItem[]>;
+  /** Group info for the directory cache. Optional per channel. */
+  chatInfo?(chatId: string): Promise<{ name?: string } | undefined>;
+  /** Every member of a group for the directory cache. Optional per channel. */
+  chatMembers?(chatId: string): Promise<{ openId: string; name: string }[]>;
 }
 
 export interface Profile {

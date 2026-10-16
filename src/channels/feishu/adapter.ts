@@ -230,6 +230,12 @@ export class FeishuChannel implements ChannelAdapter {
     const eventType = String(header?.event_type ?? body.event_type ?? "");
     if (eventType === "im.message.updated_v1" || eventType.includes("message.updated")) return [];
     const event = asRecord(body.event) ?? body;
+    if (eventType === "im.chat.updated_v1") {
+      const chatId = String(event.chat_id ?? "");
+      const after = asRecord(event.after_change);
+      const name = typeof after?.name === "string" ? after.name : undefined;
+      return chatId ? [{ type: "chat_updated", chatId, name }] : [];
+    }
     if (eventType === "im.message.recalled_v1") {
       const messageId = String(event.message_id ?? "");
       const chatId = String(event.chat_id ?? "");
@@ -444,6 +450,43 @@ export class FeishuChannel implements ChannelAdapter {
       }
     }
     return {};
+  }
+
+  async chatInfo(chatId: string): Promise<{ name?: string } | undefined> {
+    await this.limiter.take();
+    const response = await this.options.http.request({ method: "GET", path: `/open-apis/im/v1/chats/${encodeURIComponent(chatId)}` });
+    const code = response.json?.code;
+    if (code && code !== 0) throw new Error(response.json?.msg || String(code));
+    const name = response.json?.data?.name;
+    return { name: typeof name === "string" ? name : undefined };
+  }
+
+  async chatMembers(chatId: string): Promise<{ openId: string; name: string }[]> {
+    const members: { openId: string; name: string }[] = [];
+    let pageToken: string | undefined;
+    for (let page = 0; page < 50; page++) {
+      await this.limiter.take();
+      const response = await this.options.http.request({
+        method: "GET",
+        path: `/open-apis/im/v1/chats/${encodeURIComponent(chatId)}/members`,
+        query: { member_id_type: "open_id", page_size: "100", page_token: pageToken },
+      });
+      const code = response.json?.code;
+      if (code && code !== 0) throw new Error(response.json?.msg || String(code));
+      const data = response.json?.data;
+      for (const item of Array.isArray(data?.items) ? data.items : []) {
+        const record = asRecord(item);
+        const openId = String(record?.member_id ?? "");
+        const name = typeof record?.name === "string" ? record.name : "";
+        if (openId && name) {
+          members.push({ openId, name });
+          this.names.set(openId, name);
+        }
+      }
+      if (data?.has_more !== true || typeof data.page_token !== "string") break;
+      pageToken = data.page_token;
+    }
+    return members;
   }
 
   private async fetchMessage(messageId: string): Promise<FeishuRawMessage | undefined> {

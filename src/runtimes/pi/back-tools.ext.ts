@@ -121,16 +121,44 @@ const imFile = defineTool({
   },
 });
 
-const imWho = defineTool({
-  name: "im_who",
-  label: "Look up a name",
-  description: "Look up a person by display name.",
-  promptSnippet: "Look up a person by name",
+const personLookup = defineTool({
+  name: "person_lookup",
+  label: "Look up a person",
+  description:
+    "Find a person. Pass openId for an exact lookup, or query to match part of a display name. scope 'current' (default) searches the task's group; 'all' searches every known group. Returns {matches:[{openId,name,groups,match}], source}. Current-group matches come first.",
+  promptSnippet: "Find a person by open_id or name",
   parameters: Type.Object({
-    name: Type.String({ description: "Display name to look up" }),
+    openId: Type.Optional(Type.String({ description: "Exact open_id (ou_...)" })),
+    query: Type.Optional(Type.String({ description: "Part of a display name" })),
+    scope: Type.Optional(Type.Union([Type.Literal("current"), Type.Literal("all")], { description: "Where to search by name; default current" })),
   }),
   async execute(_id, params) {
-    const result = await post("/v1/im/who", { name: params.name });
+    const body: Record<string, unknown> = {};
+    if (params.openId) body.openId = params.openId;
+    if (params.query) body.query = params.query;
+    if (params.scope) body.scope = params.scope;
+    const result = await post("/v1/person/lookup", body);
+    return { content: [{ type: "text", text: result.text }], details: { ok: result.ok } };
+  },
+});
+
+const groupLookup = defineTool({
+  name: "group_lookup",
+  label: "Look up a group",
+  description:
+    "Find a group chat. Pass chatId for an exact lookup, or query to match part of a group name. Set includeMembers to list each matched group's members. Returns {matches:[{chatId,name,match,members?}], source}.",
+  promptSnippet: "Find a group by chat_id or name",
+  parameters: Type.Object({
+    chatId: Type.Optional(Type.String({ description: "Exact chat_id (oc_...)" })),
+    query: Type.Optional(Type.String({ description: "Part of a group name" })),
+    includeMembers: Type.Optional(Type.Boolean({ description: "Also list members" })),
+  }),
+  async execute(_id, params) {
+    const body: Record<string, unknown> = {};
+    if (params.chatId) body.chatId = params.chatId;
+    if (params.query) body.query = params.query;
+    if (params.includeMembers) body.includeMembers = true;
+    const result = await post("/v1/group/lookup", body);
     return { content: [{ type: "text", text: result.text }], details: { ok: result.ok } };
   },
 });
@@ -141,5 +169,6 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool(taskGet);
   pi.registerTool(imHistory);
   pi.registerTool(imFile);
-  pi.registerTool(imWho);
+  pi.registerTool(personLookup);
+  pi.registerTool(groupLookup);
 }

@@ -19,6 +19,9 @@ export async function startFeishuSocket(options: { appId: string; appSecret: str
     "im.message.reaction.deleted_v1": async (data) => {
       await options.channel.ingest(data);
     },
+    "im.chat.updated_v1": async (data) => {
+      await options.channel.ingest(data);
+    },
     "card.action.trigger": async (data: unknown) => {
       await options.channel.ingest(data);
       return { toast: { type: "info", content: "已记录" } };

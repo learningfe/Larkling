@@ -39,13 +39,17 @@ async function main(): Promise<void> {
       return taskCommand(args[1]);
     case "im":
       return imCommand(args[1]);
+    case "person":
+      return personCommand(args[1]);
+    case "group":
+      return groupCommand(args[1]);
     default:
       process.stdout.write(usage());
   }
 }
 
 function usage(): string {
-  return `larkling <start|status|doctor|service|config|task|im>
+  return `larkling <start|status|doctor|service|config|task|im|person|group>
 
   start [--config file]      启动一个 bot 进程
   status [--config file]     查看会话与任务
@@ -53,7 +57,9 @@ function usage(): string {
   service print systemd|launchd
   config validate|schema|print [--config file]
   task start|continue|update|get|list|cancel
-  im history|file|who
+  im history|file
+  person lookup --open-id <id> | --query <name> [--scope current|all]
+  group lookup --chat-id <id> | --query <name> [--members]
 `;
 }
 
@@ -229,11 +235,25 @@ async function imCommand(op: string | undefined): Promise<void> {
       return print(await call(api, "/v1/im/history", { container: required("--container"), start: flag("--start"), end: flag("--end"), limit: flag("--limit") ? Number(flag("--limit")) : undefined }));
     case "file":
       return print(await call(api, "/v1/im/file", { messageId: required("--message"), key: required("--key") }));
-    case "who":
-      return print(await call(api, "/v1/im/who", { name: required("--name") }));
     default:
-      throw new Error("usage: larkling im history|file|who");
+      throw new Error("usage: larkling im history|file");
   }
+}
+
+async function personCommand(op: string | undefined): Promise<void> {
+  if (op !== "lookup") throw new Error("usage: larkling person lookup (--open-id <ou_...> | --query <name> [--scope current|all])");
+  const openId = flag("--open-id");
+  const query = flag("--query");
+  if (!openId && !query) throw new Error("missing --open-id or --query");
+  return print(await call(apiLocation(), "/v1/person/lookup", { openId, query, scope: flag("--scope") }));
+}
+
+async function groupCommand(op: string | undefined): Promise<void> {
+  if (op !== "lookup") throw new Error("usage: larkling group lookup (--chat-id <oc_...> | --query <name>) [--members]");
+  const chatId = flag("--chat-id");
+  const query = flag("--query");
+  if (!chatId && !query) throw new Error("missing --chat-id or --query");
+  return print(await call(apiLocation(), "/v1/group/lookup", { chatId, query, includeMembers: args.includes("--members") }));
 }
 
 async function openChannel(config: LarklingConfig): Promise<{ config: LarklingConfig; channel: MemoryChannel | FeishuChannel; bot?: BotIdentity }> {
