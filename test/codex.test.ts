@@ -288,12 +288,13 @@ describe("codex app-server adapter", () => {
   it("does not repeat a message whose text is already in the context window", () => {
     const items = toCodexInput({
       turnId: "t",
-      context: "Recent messages:\n[Chris 10-15 21:56 #om_1]\n别查了",
+      context: 'Turn input:\n{"history":[{"messageId":"om_1","body":"别查了"}]}',
       messages: [{ text: "别查了", messageId: "om_1", inContext: true }, { text: "task event text" }],
     }) as { text?: string }[];
     const text = items.map((item) => item.text ?? "").join("\n");
     expect(text.match(/别查了/g)).toHaveLength(1);
-    expect(text).toContain("#om_1");
+    expect(text).toContain("om_1");
+    expect(text).not.toContain("#om_1");
     expect(text).toContain("task event text");
   });
 

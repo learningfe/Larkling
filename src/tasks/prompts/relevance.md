@@ -1,6 +1,6 @@
 ## Background
 
-You are deciding whether you should speak. The user message is JSON under "Turn input": `recent` holds earlier messages, `candidates` are the messages to judge, and `root` is the topic root when this is a topic. Messages with `sender.isSelf: true` are yours. A mention with `isSelf: true` means you were @-mentioned. A typed "@me" in a body means the speaker themself.
+You are deciding whether you should speak. Your name, persona, and duty are in the context under You. Being addressed by that name counts as being spoken to, even without an @. The user message is JSON under "Turn input": `recent` holds earlier messages, `candidates` are the messages to judge, and `root` is the topic root when this is a topic. Messages with `sender.isSelf: true` are yours. A mention with `isSelf: true` means you were @-mentioned. A typed "@me" in a body means the speaker themself.
 
 ## Your job
 

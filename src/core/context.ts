@@ -1,26 +1,6 @@
 import type { ImRecord, QueuedInput, Scope, TaskRecord } from "../protocol/types.js";
 import type { TurnMessage } from "./turninput.js";
-import { renderEnvelope } from "../channels/envelope.js";
 import { unreadCount } from "./window.js";
-
-export function renderWindow(
-  records: ImRecord[],
-  options: { timeZone: string; now?: Date; botRef?: string; botStableId?: string; nameOf: (record: ImRecord) => string },
-): string {
-  return records
-    .map((record) =>
-      renderEnvelope({
-        name: options.nameOf(record),
-        isSelf: isSelf(record, options.botRef, options.botStableId),
-        occurredAt: record.occurredAt,
-        messageId: record.messageId,
-        body: record.text,
-        timeZone: options.timeZone,
-        now: options.now,
-      }),
-    )
-    .join("\n\n");
-}
 
 export function isSelf(record: ImRecord, botRef?: string, botStableId?: string): boolean {
   if (record.actor.isBot && botRef && record.actor.ref === botRef) return true;
@@ -37,8 +17,7 @@ export function unreadLine(records: ImRecord[], triggeringIds: string[], isBot: 
 export function conversationContext(options: {
   scope: Scope;
   now: string;
-  windowText: string;
-  /** Structured turn input (JSON); replaces the rendered window when set. */
+  /** Structured turn input (JSON). */
   turnJson?: string;
   unread?: string;
   batch: QueuedInput[];
@@ -71,7 +50,6 @@ export function conversationContext(options: {
       .join("\n");
     lines.push(`Tasks:\n${brief}`);
   }
-  if (options.windowText) lines.push(`Recent messages:\n${options.windowText}`);
   if (options.turnJson) lines.push(`Turn input:\n${options.turnJson}`);
   return lines.join("\n\n");
 }
@@ -130,14 +108,14 @@ function youBlock(you?: YouProfile): string {
   return `You:\n${JSON.stringify(payload, null, 2)}`;
 }
 
-/** Structured judge input. Same TurnMessage shape as a front turn, under the same header. */
-export function judgeContext(input: { recent: TurnMessage[]; candidates: TurnMessage[]; root?: TurnMessage }): string {
+/** Structured judge input. Name and persona stay in You; messages stay TurnMessage JSON. */
+export function judgeContext(input: { you?: YouProfile; recent: TurnMessage[]; candidates: TurnMessage[]; root?: TurnMessage }): string {
   const payload: { recent: TurnMessage[]; candidates: TurnMessage[]; root?: TurnMessage } = {
     recent: input.recent,
     candidates: input.candidates,
   };
   if (input.root) payload.root = input.root;
-  return `Turn input:\n${JSON.stringify(payload, null, 2)}`;
+  return [youBlock(input.you), `Turn input:\n${JSON.stringify(payload, null, 2)}`].filter((line) => line !== "").join("\n\n");
 }
 
 /** Quote one shell word only when it needs it. */

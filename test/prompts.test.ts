@@ -66,6 +66,8 @@ describe("built-in prompts", () => {
     expect(text).toContain("## How to do it");
     expect(text).toContain("## Examples");
     expect(text).toContain("sender.isSelf: true");
+    expect(text).toContain("under You");
+    expect(text).toContain("even without an @");
     expect(text).toContain("usefully answer");
     expect(text).toContain("thread you were already in");
     expect(text).not.toContain("the bot");
@@ -89,7 +91,7 @@ describe("built-in prompts", () => {
 });
 
 describe("judge context", () => {
-  it("passes structured turn messages and does not repeat persona or an envelope", () => {
+  it("passes You plus structured turn messages and does not render an envelope", () => {
     const message = (id: string, body: string, isSelf = false): TurnMessage => ({
       messageId: id,
       sender: { openId: "ou_x", name: isSelf ? "Larkling" : "Sam", isSelf },
@@ -98,12 +100,15 @@ describe("judge context", () => {
       body,
     });
     const text = judgeContext({
+      you: { name: "Larkling", persona: "a personal assistant", duty: "help the owner" },
       recent: [message("old", "earlier")],
       candidates: [message("new", "hello")],
       root: message("root", "topic"),
     });
-    expect(text.startsWith("Turn input:\n")).toBe(true);
-    const payload = JSON.parse(text.slice("Turn input:\n".length));
+    expect(text).toContain('"name": "Larkling"');
+    expect(text).toContain('"persona": "a personal assistant"');
+    expect(text).toContain('"duty": "help the owner"');
+    const payload = JSON.parse(text.slice(text.indexOf("Turn input:\n") + "Turn input:\n".length));
     expect(payload.recent.map((item: TurnMessage) => item.messageId)).toEqual(["old"]);
     expect(payload.candidates[0]).toMatchObject({ messageId: "new", body: "hello", sender: { isSelf: false } });
     expect(payload.root.messageId).toBe("root");

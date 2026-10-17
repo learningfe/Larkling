@@ -15,7 +15,9 @@ function conversation(h: Harness, id = "ou_owner") {
 
 describe("in-memory channel and scripted runtime", () => {
   it("answers an owner DM and stays silent on [[silent]]", async () => {
-    const h = await startHarness();
+    const h = await startHarness((config) => {
+      config.persona.duty = "help the owner";
+    });
     h.runtime.handler = async (turn) => {
       const text = turn.input.messages.map((item) => item.text).join("\n");
       turn.emit({ type: "turn.completed", text: text === "quiet" ? "[[silent]]" : `echo:${text}` });
@@ -28,6 +30,8 @@ describe("in-memory channel and scripted runtime", () => {
     expect(h.runtime.opens[0].instructions).not.toContain("a personal assistant");
     expect(h.runtime.starts[0].input.context).toContain('"name": "Larkling"');
     expect(h.runtime.starts[0].input.context).toContain("a personal assistant");
+    expect(h.runtime.starts[0].input.context).toContain('"duty": "help the owner"');
+    expect(h.runtime.opens[0].instructions).not.toContain("help the owner");
     expect(h.runtime.opens[0].profile.network).toBe(false);
     expect(h.runtime.opens[0].profile.cwd).toMatch(/\/front$/);
     expect(h.runtime.starts[0].input.context).toContain("Token:");
@@ -399,6 +403,15 @@ describe("in-memory channel and scripted runtime", () => {
         mentionsSelf: false,
         occurredAt: "2026-03-15T01:00:00.000Z",
       },
+      {
+        messageId: "g1",
+        scope,
+        actor: human,
+        text: "climb",
+        attachments: [],
+        mentionsSelf: false,
+        occurredAt: "2026-03-15T02:00:00.000Z",
+      },
     ]);
     const other = { channel: "memory", ref: "ou_t", stableId: "feishu:on_other", name: "Tim", isBot: false };
     h.channel.push(message({ text: "climb", messageId: "g1", scope, actor: human, mentionsSelf: false }));
@@ -435,10 +448,13 @@ describe("in-memory channel and scripted runtime", () => {
       ["g1b", "afternoon"],
     ]);
     expect(judgePayload).not.toHaveProperty("root");
+    expect(judgeStart?.input.context).toContain('"name": "Larkling"');
+    expect(judgeStart?.input.context).toContain("a personal assistant");
     expect(judgeStart?.input.context).not.toContain("Persona:");
     expect(judgeStart?.input.context).not.toContain("Duty:");
     expect(judgeStart?.input.context).not.toMatch(/\[我 /);
     expect(judgeStart?.input.context).not.toContain("#old]");
+    expect(judgeStart?.input.messages.every((item) => item.inContext)).toBe(true);
 
     h.channel.push(message({ text: "weather", messageId: "g2", scope, actor: human, mentionsSelf: false }));
     await waitFor(() => h.host.snapshot().seenMessageIds.includes("g2"), "buffered weather");
@@ -566,11 +582,18 @@ describe("in-memory channel and scripted runtime", () => {
     const started = await post(h.host.apiUrl, parent.token, "/v1/task/start", { body: "work", followUpEnabled: false });
     expect(started.status).toBe(200);
     await h.host.settle();
-    expect(h.runtime.opens.find((item) => item.kind === "task")?.profile).toMatchObject({
+    const taskOpen = h.runtime.opens.find((item) => item.kind === "task");
+    expect(taskOpen?.profile).toMatchObject({
       model: "back-model",
       fast: true,
       network: true,
     });
+    expect(taskOpen?.instructions).toContain("back instructions");
+    expect(taskOpen?.instructions).not.toContain("Your name is");
+    expect(taskOpen?.instructions).not.toContain("a personal assistant");
+    const taskStart = h.runtime.starts.find((item) => item.ref === `scripted:${taskOpen?.sessionId}`);
+    expect(taskStart?.input.context).toContain('"name": "Larkling"');
+    expect(taskStart?.input.context).toContain("a personal assistant");
     const scope = { channel: "memory", kind: "topic" as const, id: "omt_fast", parentId: "oc_family" };
     const human = { channel: "memory", ref: "ou_s", stableId: "feishu:on_stranger", name: "Sam", isBot: false };
     await pushAndSettle(h, message({ text: "@bot", messageId: "f2", scope, actor: human, mentionsSelf: true }));

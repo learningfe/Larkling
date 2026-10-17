@@ -27,7 +27,6 @@ import type {
 import { conversationSessionId, scopeKey, taskSessionId } from "../protocol/types.js";
 import { parseCheckReply, parseConversationReply, parseJudgeReply } from "../protocol/reply.js";
 import { buildSeed, transcriptTokens } from "../protocol/seed.js";
-import { renderEnvelope } from "../channels/envelope.js";
 import { backInstructions, compactInstructions, frontInstructions, heartbeatInstructions, relevanceInstructions, withFile } from "../tasks/prompts.js";
 import { listenApi } from "../tasks/api.js";
 import { heartbeatDue, slotsUsed } from "../tasks/scheduler.js";
@@ -1022,16 +1021,20 @@ export class Host {
   }
 
   private async runJudge(batch: { scope: Scope; messages: MessageEvent[] }): Promise<void> {
-    const recent = await this.safeHistory(batch.scope, this.config.im.gate.judgeContext, new Date(this.clock.now() - this.config.im.window.maxAgeMs).toISOString());
-    const root = batch.scope.kind === "topic" ? recent[0] : undefined;
-    const recentMessages = recent.map((record) => this.turnMessage(record));
+    const history = await this.safeHistory(batch.scope, this.config.im.gate.judgeContext, new Date(this.clock.now() - this.config.im.window.maxAgeMs).toISOString());
+    const candidateIds = new Set(batch.messages.map((message) => message.messageId));
+    // Platform history already includes the messages being judged. recent is only
+    // what came before them; the oldest history row is the topic root when we have one.
+    const earlier = history.filter((record) => !candidateIds.has(record.messageId));
+    const root = batch.scope.kind === "topic" ? history[0] : undefined;
     const candidates = batch.messages.map((message) => this.turnMessage(this.recordFromMessage(message)));
     let text: string;
     try {
       text = await this.runOneShot(
         "judge",
         judgeContext({
-          recent: recentMessages,
+          you: this.youProfile(),
+          recent: earlier.map((record) => this.turnMessage(record)),
           candidates,
           root: root ? this.turnMessage(root) : undefined,
         }),
@@ -1104,7 +1107,13 @@ export class Host {
       const session = this.must(sessionId);
       await this.ensureRuntime(session);
       const turnId = newId();
-      const input: TurnInput = { turnId, context, messages: messages.map((text) => ({ text })) };
+      const input: TurnInput = {
+        turnId,
+        context,
+        // Judge candidates already live in the Turn input JSON. inContext stops Codex and pi
+        // from appending that raw text after the JSON.
+        messages: messages.map((text) => ({ text, ...(kind === "judge" ? { inContext: true } : {}) })),
+      };
       const now = this.iso();
       await this.stateStore.update((draft) => {
         const current = draft.sessions[sessionId];
@@ -1314,7 +1323,6 @@ export class Host {
       ? conversationContext({
           scope,
           now: this.iso(),
-          windowText: "",
           turnJson: structured ? JSON.stringify(structured, null, 2) : undefined,
           batch,
           tasks,
@@ -1561,18 +1569,10 @@ export class Host {
       records = [...merged.values()];
     }
     records.sort((a, b) => a.occurredAt.localeCompare(b.occurredAt));
-    return records.slice(-limit).map((record) => ({
-      ...record,
-      envelope: renderEnvelope({
-        name: record.actor.name || this.persons.displayName(record.actor.stableId, record.actor.ref),
-        isSelf: isSelf(record, this.bot.ref, this.bot.stableId),
-        occurredAt: record.occurredAt,
-        messageId: record.messageId,
-        body: record.text,
-        timeZone: this.config.timezone,
-        now: new Date(this.clock.now()),
-      }),
-    }));
+    return records.slice(-limit).map((record) => {
+      const message = this.turnMessage(record);
+      return record.attachments.length ? { ...message, attachments: record.attachments } : message;
+    });
   }
 
   async imFile(token: string, body: { messageId: string; key: string }): Promise<unknown> {
