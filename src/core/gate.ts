@@ -8,8 +8,8 @@ export type GateDecisionSource = "judge" | "short_circuit";
 
 /**
  * One `gate.decision` line per allow or skip.
- * `reason` is a stable code when the model was not called, and the judge's
- * raw text when it was. Callers must not replace that text with a summary.
+ * `reason` is a stable code when the model was not called.
+ * When the judge ran, it is the one sentence the model gave, or `reason_missing`.
  */
 export function logGateDecision(
   log: Logger,

@@ -376,10 +376,13 @@ describe("in-memory channel and scripted runtime", () => {
         return;
       }
       const text = turn.input.messages.map((item) => item.text).join("\n");
-      if (text.startsWith("climb")) turn.emit({ type: "turn.completed", text: "RESPOND\nowner wants to hike" });
-      else if (text === "weather") turn.emit({ type: "turn.completed", text: "maybe\nnot sure" });
+      if (text.startsWith("climb")) {
+        turn.emit({ type: "turn.completed", text: "RESPOND\n刚才在排登山，这条是在定下午出发。后面这句不要记。" });
+      } else if (text === "weather") {
+        turn.emit({ type: "turn.completed", text: "SKIP\n群在聊算术与工具，这条是小区快递，接不上。另一句。" });
+      } else if (text === "parcel") turn.emit({ type: "turn.completed", text: "RESPOND\n相关" });
       else if (text === "boom") turn.emit({ type: "turn.failed", error: "light model down", retryable: false });
-      else turn.emit({ type: "turn.completed", text: "IGNORE" });
+      else turn.emit({ type: "turn.completed", text: "SKIP" });
     };
     const scope = groupScope("oc_desk");
     const human = { channel: "memory", ref: "ou_s", stableId: "feishu:on_stranger", name: "Sam", isBot: false };
@@ -398,7 +401,7 @@ describe("in-memory channel and scripted runtime", () => {
       scopeKind: "group",
       messageIds: ["g1", "g1b"],
       decision: "allow",
-      reason: "RESPOND\nowner wants to hike",
+      reason: "刚才在排登山，这条是在定下午出发。",
       mode: "relevant",
       mentionsSelf: false,
       senderIds: ["feishu:on_stranger", "feishu:on_other"],
@@ -416,7 +419,7 @@ describe("in-memory channel and scripted runtime", () => {
     expect(gateDecisions(logs).at(-1)).toMatchObject({
       messageIds: ["g2"],
       decision: "skip",
-      reason: "maybe\nnot sure",
+      reason: "群在聊算术与工具，这条是小区快递，接不上。",
       mode: "relevant",
       senderId: "feishu:on_stranger",
       source: "judge",
@@ -429,7 +432,15 @@ describe("in-memory channel and scripted runtime", () => {
     h.clock.advance(1_000);
     await h.host.flushGate();
     await h.host.settle();
-    expect(gateDecisions(logs).at(-1)).toMatchObject({ messageIds: ["g3"], decision: "skip", reason: "IGNORE", source: "judge" });
+    expect(gateDecisions(logs).at(-1)).toMatchObject({ messageIds: ["g3"], decision: "skip", reason: "reason_missing", source: "judge" });
+
+    h.channel.push(message({ text: "parcel", messageId: "g3b", scope, actor: human, mentionsSelf: false }));
+    await waitFor(() => h.host.snapshot().seenMessageIds.includes("g3b"), "buffered parcel");
+    await h.host.settle();
+    h.clock.advance(1_000);
+    await h.host.flushGate();
+    await h.host.settle();
+    expect(gateDecisions(logs).at(-1)).toMatchObject({ messageIds: ["g3b"], decision: "allow", reason: "reason_missing", source: "judge" });
 
     const judgesBefore = h.runtime.opens.filter((item) => item.kind === "judge").length;
     await pushAndSettle(h, message({ text: "@bot", messageId: "g4", scope, actor: human, mentionsSelf: true }));
@@ -497,7 +508,7 @@ describe("in-memory channel and scripted runtime", () => {
       error: "light model down",
     });
     expect(logs.events.some((item) => item.event === "judge.failed")).toBe(true);
-    expect(h.channel.sent.filter((item) => item.action.type === "text" && item.action.text === "front")).toHaveLength(2);
+    expect(h.channel.sent.filter((item) => item.action.type === "text" && item.action.text === "front")).toHaveLength(3);
   });
 
   it("passes fast through the front, back, and light profiles", async () => {

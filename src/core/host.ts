@@ -1066,16 +1066,16 @@ export class Host {
       });
       throw error;
     }
-    const verdict = parseJudgeReply(text);
+    const judged = parseJudgeReply(text);
     logGateDecision(this.log, {
       scope: batch.scope,
       messages: batch.messages,
-      decision: verdict === "respond" ? "allow" : "skip",
-      reason: text,
+      decision: judged.verdict === "respond" ? "allow" : "skip",
+      reason: judged.reason,
       mode: this.gate.modeFor(batch.scope),
       source: "judge",
     });
-    if (verdict === "respond") await this.deliverMessages(batch.scope, batch.messages);
+    if (judged.verdict === "respond") await this.deliverMessages(batch.scope, batch.messages);
   }
 
   private logGateShortCircuit(event: MessageEvent, decision: "allow" | "skip", reason: string): void {
