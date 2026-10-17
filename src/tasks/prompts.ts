@@ -1,6 +1,6 @@
 export {
-  MESSAGE_NOTES,
   withFile,
+  readPrompt,
   frontInstructions,
   backInstructions,
   heartbeatInstructions,

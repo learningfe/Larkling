@@ -1,13 +1,34 @@
 /**
- * Built-in system prompts, split by role:
- * - FRONT: conversation agent
- * - BACK: background task worker
- * - HEARTBEAT: followed-task wake check
- * - RELEVANCE: gate whether FRONT should reply
+ * Built-in system prompts, one fixed Markdown file per role.
+ * Check uses the heartbeat prompt.
  */
-export { MESSAGE_NOTES, withFile } from "./shared.js";
-export { frontInstructions } from "./front.js";
-export { backInstructions } from "./back.js";
-export { heartbeatInstructions, checkInstructions } from "./heartbeat.js";
-export { relevanceInstructions, judgeInstructions } from "./relevance.js";
-export { compactInstructions } from "./compact.js";
+export { withFile } from "./shared.js";
+export { readPrompt } from "./load.js";
+
+import { readPrompt } from "./load.js";
+
+export function frontInstructions(): string {
+  return readPrompt("front");
+}
+
+export function backInstructions(): string {
+  return readPrompt("back");
+}
+
+export function heartbeatInstructions(): string {
+  return readPrompt("heartbeat");
+}
+
+/** Check sessions use the heartbeat prompt. */
+export const checkInstructions = heartbeatInstructions;
+
+export function relevanceInstructions(): string {
+  return readPrompt("relevance");
+}
+
+/** @deprecated Prefer relevanceInstructions. */
+export const judgeInstructions = relevanceInstructions;
+
+export function compactInstructions(): string {
+  return readPrompt("compact");
+}
