@@ -35,7 +35,7 @@ import { newId, sha256 } from "../util/id.js";
 import { Logger } from "../log.js";
 import { purgeOldFiles } from "./cleanup.js";
 import { systemClock, type Clock } from "./clock.js";
-import { checkContext, conversationContext, isSelf, judgeContext, taskContext } from "./context.js";
+import { checkContext, conversationContext, isSelf, judgeContext, taskContext, type YouProfile } from "./context.js";
 import { batchTrigger, classifyArrival, takeBatch, withoutMessage } from "./delivery.js";
 import { ApiError, isSteerRejected, SteerRejected } from "./errors.js";
 import { Gate, logGateDecision } from "./gate.js";
@@ -1024,33 +1024,16 @@ export class Host {
   private async runJudge(batch: { scope: Scope; messages: MessageEvent[] }): Promise<void> {
     const recent = await this.safeHistory(batch.scope, this.config.im.gate.judgeContext, new Date(this.clock.now() - this.config.im.window.maxAgeMs).toISOString());
     const root = batch.scope.kind === "topic" ? recent[0] : undefined;
-    const rendered = (records: ImRecord[]) =>
-      records
-        .map((record) =>
-          renderEnvelope({
-            name: record.actor.name || this.persons.displayName(record.actor.stableId, record.actor.ref),
-            isSelf: isSelf(record, this.bot.ref, this.bot.stableId),
-            occurredAt: record.occurredAt,
-            messageId: record.messageId,
-            body: record.text,
-            timeZone: this.config.timezone,
-            now: new Date(this.clock.now()),
-          }),
-        )
-        .join("\n\n");
-    const candidates = batch.messages
-      .map((message) => `${message.actor.name}: ${message.text}`)
-      .join("\n");
+    const recentMessages = recent.map((record) => this.turnMessage(record));
+    const candidates = batch.messages.map((message) => this.turnMessage(this.recordFromMessage(message)));
     let text: string;
     try {
       text = await this.runOneShot(
         "judge",
         judgeContext({
-          persona: this.config.persona.text,
-          duty: this.config.persona.duty,
-          root: root ? rendered([root]) : undefined,
-          recent: rendered(recent),
+          recent: recentMessages,
           candidates,
+          root: root ? this.turnMessage(root) : undefined,
         }),
         batch.messages.map((message) => message.text),
       );
@@ -1271,6 +1254,7 @@ export class Host {
             taskId: task?.taskId ?? session.taskId,
             version: task?.version,
             backTaskTools: this.usesAgentTools(session),
+            you: this.youProfile(),
           }),
           messages: [{ text: prompt }],
         },
@@ -1312,14 +1296,6 @@ export class Host {
     advanceMark(mark, [...history, ...records]);
     for (const record of [...history, ...records]) this.noteVisible(sessionId, record);
     const tasks = Object.values(this.stateStore.get().tasks).filter((task) => task.parentSessionId === sessionId);
-    const now = new Date(this.clock.now());
-    const shape = (record: ImRecord) =>
-      toTurnMessage(record, {
-        timeZone: this.config.timezone,
-        now,
-        isSelf: (ref, full) => (full ? isSelf(full, this.bot.ref, this.bot.stableId) : Boolean(this.bot.ref) && ref === this.bot.ref),
-        nameOf: (item) => (isSelf(item, this.bot.ref, this.bot.stableId) && this.bot.name) || item.actor.name || this.persons.displayName(item.actor.stableId, item.actor.ref),
-      });
     const structured: StructuredTurn | undefined = scope
       ? {
           turn: { kind: session.kind, cold, scope: { kind: scope.kind, id: scope.id } },
@@ -1327,10 +1303,10 @@ export class Host {
             ? {
                 mode: "full",
                 range: history.length ? { from: localIso(history[0].occurredAt, this.config.timezone), to: localIso(history[history.length - 1].occurredAt, this.config.timezone) } : null,
-                messages: history.map(shape),
+                messages: history.map((record) => this.turnMessage(record)),
               }
-            : { mode: "incremental", since: localIso(sinceMs, this.config.timezone), newCount: history.length, messages: history.map(shape) },
-          trigger: records.map(shape),
+            : { mode: "incremental", since: localIso(sinceMs, this.config.timezone), newCount: history.length, messages: history.map((record) => this.turnMessage(record)) },
+          trigger: records.map((record) => this.turnMessage(record)),
         }
       : undefined;
     if (structured) this.log.info("turn.input", { sessionId, cold, mode: structured.history.mode, historyCount: history.length, triggerCount: records.length });
@@ -1347,6 +1323,7 @@ export class Host {
           sessionId,
           cli: this.cli,
           frontTaskTools: this.usesAgentTools(session),
+          you: this.youProfile(),
         })
       : "";
     const windowIds = scope ? records.map((record) => record.messageId) : [];
@@ -1790,14 +1767,43 @@ export class Host {
   }
 
   private instructionsFor(kind: SessionKind): string {
-    const persona = this.config.persona.text;
-    const duty = this.config.persona.duty;
-    const name = this.config.persona.name || this.bot.name || "assistant";
-    if (kind === "task") return withFile(backInstructions(persona, duty), this.config.agents.back.instructions);
+    if (kind === "task") return withFile(backInstructions(), this.config.agents.back.instructions);
     if (kind === "check") return heartbeatInstructions();
-    if (kind === "judge") return relevanceInstructions(persona, duty, name);
+    if (kind === "judge") return relevanceInstructions();
     if (kind === "compact") return compactInstructions();
-    return withFile(frontInstructions(persona, duty, name), this.config.agents.front.instructions);
+    return withFile(frontInstructions(), this.config.agents.front.instructions);
+  }
+
+  private youProfile(): YouProfile {
+    const duty = this.config.persona.duty.trim();
+    return {
+      name: this.config.persona.name || this.bot.name || "assistant",
+      persona: this.config.persona.text,
+      ...(duty ? { duty } : {}),
+    };
+  }
+
+  private turnMessage(record: ImRecord) {
+    return toTurnMessage(record, {
+      timeZone: this.config.timezone,
+      now: new Date(this.clock.now()),
+      isSelf: (ref, full) => (full ? isSelf(full, this.bot.ref, this.bot.stableId) : Boolean(this.bot.ref) && ref === this.bot.ref),
+      nameOf: (item) => (isSelf(item, this.bot.ref, this.bot.stableId) && this.bot.name) || item.actor.name || this.persons.displayName(item.actor.stableId, item.actor.ref),
+    });
+  }
+
+  private recordFromMessage(message: MessageEvent): ImRecord {
+    return {
+      messageId: message.messageId,
+      scope: message.scope,
+      actor: message.actor,
+      text: message.text,
+      attachments: message.attachments,
+      mentionsSelf: message.mentionsSelf,
+      mentions: message.mentions,
+      occurredAt: message.occurredAt,
+      replyTo: message.replyTo,
+    };
   }
 
   /** Env for agent tools (pi extensions / Codex dynamicTools). Conversation and task sessions. */

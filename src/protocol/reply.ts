@@ -40,6 +40,8 @@ const EMPTY_REASONS = new Set([
   "unrelated",
   "on topic",
   "off topic",
+  "on-topic",
+  "off-topic",
   "not relevant",
 ]);
 

@@ -1,4 +1,5 @@
 import type { ImRecord, QueuedInput, Scope, TaskRecord } from "../protocol/types.js";
+import type { TurnMessage } from "./turninput.js";
 import { renderEnvelope } from "../channels/envelope.js";
 import { unreadCount } from "./window.js";
 
@@ -48,14 +49,16 @@ export function conversationContext(options: {
   cli?: string[];
   /** When true, task_start / task_cancel are dedicated tools; omit them from Commands. */
   frontTaskTools?: boolean;
+  you?: YouProfile;
 }): string {
   const lines = [
     `Now: ${options.now}`,
     `Scope: ${options.scope.channel} ${options.scope.kind} ${options.scope.id}`,
+    youBlock(options.you),
     `Task API: ${options.apiUrl}`,
     `Token: ${options.token}`,
     `Session: ${options.sessionId}`,
-  ];
+  ].filter((line) => line !== "");
   if (options.cli) lines.push(commandsBlock({ cli: options.cli, apiUrl: options.apiUrl, token: options.token, container: options.scope.id, role: "front", frontTaskTools: options.frontTaskTools }));
   if (options.unread) lines.push(options.unread);
   const taskEvent = options.batch.find((item) => item.kind === "task_event");
@@ -83,8 +86,10 @@ export function taskContext(options: {
   version?: number;
   /** When true, back tools replace the Commands block. */
   backTaskTools?: boolean;
+  you?: YouProfile;
 }): string {
   const lines = [
+    youBlock(options.you),
     "Task body:",
     options.body,
     "",
@@ -112,10 +117,27 @@ export function checkContext(task: TaskRecord): string {
   ].join("\n");
 }
 
-export function judgeContext(options: { persona: string; duty: string; root?: string; recent: string; candidates: string }): string {
-  return [`Persona: ${options.persona}`, options.duty ? `Duty: ${options.duty}` : "", options.root ? `Topic root:\n${options.root}` : "", `Recent messages:\n${options.recent}`, `Candidates:\n${options.candidates}`]
-    .filter(Boolean)
-    .join("\n\n");
+export interface YouProfile {
+  name: string;
+  persona: string;
+  duty?: string;
+}
+
+function youBlock(you?: YouProfile): string {
+  if (!you) return "";
+  const payload: YouProfile = { name: you.name, persona: you.persona };
+  if (you.duty?.trim()) payload.duty = you.duty.trim();
+  return `You:\n${JSON.stringify(payload, null, 2)}`;
+}
+
+/** Structured judge input. Same TurnMessage shape as a front turn, under the same header. */
+export function judgeContext(input: { recent: TurnMessage[]; candidates: TurnMessage[]; root?: TurnMessage }): string {
+  const payload: { recent: TurnMessage[]; candidates: TurnMessage[]; root?: TurnMessage } = {
+    recent: input.recent,
+    candidates: input.candidates,
+  };
+  if (input.root) payload.root = input.root;
+  return `Turn input:\n${JSON.stringify(payload, null, 2)}`;
 }
 
 /** Quote one shell word only when it needs it. */

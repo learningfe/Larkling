@@ -44,6 +44,8 @@ describe("reply protocol", () => {
     expect(parseJudgeReply("SKIP")).toEqual({ verdict: "ignore", reason: "reason_missing" });
     expect(parseJudgeReply("RESPOND\n相关")).toEqual({ verdict: "respond", reason: "reason_missing" });
     expect(parseJudgeReply("SKIP\n与话题无关")).toEqual({ verdict: "ignore", reason: "reason_missing" });
+    expect(parseJudgeReply("SKIP\noff-topic")).toEqual({ verdict: "ignore", reason: "reason_missing" });
+    expect(parseJudgeReply("RESPOND\nrelated")).toEqual({ verdict: "respond", reason: "reason_missing" });
     expect(parseJudgeReply("RESPOND\n「相关」")).toEqual({ verdict: "respond", reason: "reason_missing" });
     expect(parseJudgeReply("RESPOND\nOwner is still on the hike plan. Extra essay.")).toEqual({
       verdict: "respond",

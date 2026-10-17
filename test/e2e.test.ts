@@ -24,7 +24,10 @@ describe("in-memory channel and scripted runtime", () => {
     expect(h.channel.sent.map((item) => (item.action.type === "text" ? item.action.text : ""))).toEqual(["echo:hello"]);
     expect(conversation(h).phase).toBe("idle");
     expect(h.runtime.opens[0].instructions).toContain("front instructions");
-    expect(h.runtime.opens[0].instructions).toContain("Your name is Larkling");
+    expect(h.runtime.opens[0].instructions).not.toContain("Your name is Larkling");
+    expect(h.runtime.opens[0].instructions).not.toContain("a personal assistant");
+    expect(h.runtime.starts[0].input.context).toContain('"name": "Larkling"');
+    expect(h.runtime.starts[0].input.context).toContain("a personal assistant");
     expect(h.runtime.opens[0].profile.network).toBe(false);
     expect(h.runtime.opens[0].profile.cwd).toMatch(/\/front$/);
     expect(h.runtime.starts[0].input.context).toContain("Token:");
@@ -386,6 +389,17 @@ describe("in-memory channel and scripted runtime", () => {
     };
     const scope = groupScope("oc_desk");
     const human = { channel: "memory", ref: "ou_s", stableId: "feishu:on_stranger", name: "Sam", isBot: false };
+    h.channel.histories.set("oc_desk", [
+      {
+        messageId: "old",
+        scope,
+        actor: human,
+        text: "earlier thread",
+        attachments: [],
+        mentionsSelf: false,
+        occurredAt: "2026-03-15T01:00:00.000Z",
+      },
+    ]);
     const other = { channel: "memory", ref: "ou_t", stableId: "feishu:on_other", name: "Tim", isBot: false };
     h.channel.push(message({ text: "climb", messageId: "g1", scope, actor: human, mentionsSelf: false }));
     h.channel.push(message({ text: "afternoon", messageId: "g1b", scope, actor: other, mentionsSelf: false }));
@@ -409,6 +423,22 @@ describe("in-memory channel and scripted runtime", () => {
     });
     expect(gateDecisions(logs).at(-1)).not.toHaveProperty("senderId");
     expect(h.channel.sent.some((item) => item.action.type === "text" && item.action.text === "front")).toBe(true);
+    const judgeOpen = h.runtime.opens.find((item) => item.kind === "judge");
+    expect(judgeOpen?.instructions).toContain("## Your job");
+    expect(judgeOpen?.instructions).not.toContain("a personal assistant");
+    expect(judgeOpen?.instructions).not.toMatch(/\p{Script=Han}/u);
+    const judgeStart = h.runtime.starts.find((item) => item.ref === `scripted:${judgeOpen?.sessionId}`);
+    const judgePayload = turnJson(judgeStart?.input.context ?? "");
+    expect(judgePayload.recent.map((item: { messageId: string }) => item.messageId)).toEqual(["old"]);
+    expect(judgePayload.candidates.map((item: { messageId: string; body: string }) => [item.messageId, item.body])).toEqual([
+      ["g1", "climb"],
+      ["g1b", "afternoon"],
+    ]);
+    expect(judgePayload).not.toHaveProperty("root");
+    expect(judgeStart?.input.context).not.toContain("Persona:");
+    expect(judgeStart?.input.context).not.toContain("Duty:");
+    expect(judgeStart?.input.context).not.toMatch(/\[我 /);
+    expect(judgeStart?.input.context).not.toContain("#old]");
 
     h.channel.push(message({ text: "weather", messageId: "g2", scope, actor: human, mentionsSelf: false }));
     await waitFor(() => h.host.snapshot().seenMessageIds.includes("g2"), "buffered weather");
