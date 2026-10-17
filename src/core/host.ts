@@ -38,7 +38,7 @@ import { systemClock, type Clock } from "./clock.js";
 import { checkContext, conversationContext, isSelf, judgeContext, taskContext } from "./context.js";
 import { batchTrigger, classifyArrival, takeBatch, withoutMessage } from "./delivery.js";
 import { ApiError, isSteerRejected, SteerRejected } from "./errors.js";
-import { Gate } from "./gate.js";
+import { Gate, logGateDecision } from "./gate.js";
 import { ImLog, type StoredMessage } from "./imlog.js";
 import { KeyedLock } from "./lock.js";
 import { PersonDirectory } from "./persons.js";
@@ -133,7 +133,7 @@ export class Host {
     this.log = options.logger ?? new Logger(join(options.config.stateDir, "log.jsonl"), "info");
     this.bot = options.bot ?? { ref: "bot", stableId: `${options.channel.channel}:bot`, name: "bot" };
     this.useTimers = options.timers ?? false;
-    this.gate = new Gate(options.config, options.channel.capabilities.readGroupMessages, this.clock, () => this.readParticipated());
+    this.gate = new Gate(options.config, options.channel.capabilities.readGroupMessages, this.clock, () => this.readParticipated(), this.log);
   }
 
   async start(): Promise<void> {
@@ -404,15 +404,24 @@ export class Host {
         draft.botChains[scopeKey(event.scope)] = 0;
       });
     }
-    if (fromBot || event.disposition === "store_only") return;
-    if (!trustAtLeast(trust, "allowed")) return;
+    if (fromBot || event.disposition === "store_only") {
+      this.logGateShortCircuit(event, "skip", fromBot ? "self" : "store_only");
+      return;
+    }
+    if (!trustAtLeast(trust, "allowed")) {
+      this.logGateShortCircuit(event, "skip", "trust");
+      return;
+    }
     const blocked = await this.stateStore.update((draft) => {
       const key = scopeKey(event.scope);
       if (!event.actor.isBot) return false;
       draft.botChains[key] = (draft.botChains[key] ?? 0) + 1;
       return draft.botChains[key] >= this.config.session.botChainLimit;
     });
-    if (blocked) return;
+    if (blocked) {
+      this.logGateShortCircuit(event, "skip", "bot_chain");
+      return;
+    }
     if (event.disposition === "unsupported") {
       if (event.mentionsSelf || event.scope.kind === "dm") {
         const sessionId = await this.ensureConversation(event.scope);
@@ -428,6 +437,7 @@ export class Host {
           sessionId,
         );
       }
+      this.logGateShortCircuit(event, "skip", "unsupported");
       return;
     }
     const gated = this.gate.accept(event, trust);
@@ -1031,18 +1041,52 @@ export class Host {
     const candidates = batch.messages
       .map((message) => `${message.actor.name}: ${message.text}`)
       .join("\n");
-    const text = await this.runOneShot(
-      "judge",
-      judgeContext({
-        persona: this.config.persona.text,
-        duty: this.config.persona.duty,
-        root: root ? rendered([root]) : undefined,
-        recent: rendered(recent),
-        candidates,
-      }),
-      batch.messages.map((message) => message.text),
-    );
-    if (parseJudgeReply(text) === "respond") await this.deliverMessages(batch.scope, batch.messages);
+    let text: string;
+    try {
+      text = await this.runOneShot(
+        "judge",
+        judgeContext({
+          persona: this.config.persona.text,
+          duty: this.config.persona.duty,
+          root: root ? rendered([root]) : undefined,
+          recent: rendered(recent),
+          candidates,
+        }),
+        batch.messages.map((message) => message.text),
+      );
+    } catch (error) {
+      logGateDecision(this.log, {
+        scope: batch.scope,
+        messages: batch.messages,
+        decision: "skip",
+        reason: "judge_failed",
+        mode: this.gate.modeFor(batch.scope),
+        source: "judge",
+        error: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
+    }
+    const verdict = parseJudgeReply(text);
+    logGateDecision(this.log, {
+      scope: batch.scope,
+      messages: batch.messages,
+      decision: verdict === "respond" ? "allow" : "skip",
+      reason: text,
+      mode: this.gate.modeFor(batch.scope),
+      source: "judge",
+    });
+    if (verdict === "respond") await this.deliverMessages(batch.scope, batch.messages);
+  }
+
+  private logGateShortCircuit(event: MessageEvent, decision: "allow" | "skip", reason: string): void {
+    logGateDecision(this.log, {
+      scope: event.scope,
+      messages: [event],
+      decision,
+      reason,
+      mode: this.gate.modeFor(event.scope),
+      source: "short_circuit",
+    });
   }
 
   private async maybeCompact(sessionId: string): Promise<void> {
