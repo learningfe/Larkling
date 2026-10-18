@@ -7,7 +7,11 @@ describe("built-in prompts", () => {
     const text = frontInstructions("a personal assistant", "help at home", "小灵");
     expect(text).toContain("Your name is 小灵");
     expect(text).toContain("task_start");
+    expect(text).toContain("task_update");
+    expect(text).toContain("task_get");
     expect(text).toContain("task_cancel");
+    expect(text).toContain("Alice is Own, Bob is Drive, Carol is Track");
+    expect(text).toContain("[[notify <taskId>]]");
     expect(text).toContain("still write the user-facing confirmation yourself");
     expect(text).toContain("Do not inspect source code, help output, or the file system");
     expect(text).toContain("say in plain words that you will look into it");
@@ -28,6 +32,8 @@ describe("built-in prompts", () => {
     const text = backInstructions("a personal assistant", "help at home");
     expect(text).toContain("task_update");
     expect(text).toContain("task_complete");
+    expect(text).toContain("Alice asked, so she is Own");
+    expect(text).toContain("Carol is Track");
     expect(text).toContain("im_history");
     expect(text).toContain("im_file");
     expect(text.toLowerCase()).not.toContain("bash");
@@ -82,6 +88,7 @@ describe("directory prompts", async () => {
 describe("prompt roles FRONT/BACK/HEARTBEAT/RELEVANCE", () => {
   it("exports HEARTBEAT and RELEVANCE aliases", () => {
     expect(heartbeatInstructions()).toContain("WAKE");
+    expect(heartbeatInstructions()).toContain("Do not assign Own, Drive, or Track");
     expect(relevanceInstructions("p", "", "小灵")).toContain("RESPOND");
     expect(judgeInstructions("p", "", "小灵")).toContain("RESPOND");
   });

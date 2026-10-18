@@ -1,9 +1,21 @@
 import type { FinalReply, SessionKind } from "./types.js";
 
-/** Conversation: the whole reply is silent only when it equals `[[silent]]`. */
+/**
+ * Conversation: the whole reply is silent only when it equals `[[silent]]`.
+ * A `[[notify <taskId>]]` line opts this reply into that task's stored audience.
+ * The line is removed. People are not read from the line.
+ */
 export function parseConversationReply(text: string): FinalReply {
   if (text.trim() === "[[silent]]") return { kind: "silent" };
-  return { kind: "text", text };
+  const notifyLine = /(?:^|\n)[ \t]*\[\[notify[ \t]+([A-Za-z0-9_-]+)\]\][ \t]*(?=$|\n)/g;
+  const ids: string[] = [];
+  const stripped = text.replace(notifyLine, (match, id: string) => {
+    ids.push(id);
+    return match.startsWith("\n") ? "\n" : "";
+  });
+  if (!ids.length) return { kind: "text", text };
+  const cleaned = stripped.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+  return { kind: "text", text: cleaned, notifyTaskId: ids[ids.length - 1] };
 }
 
 /**

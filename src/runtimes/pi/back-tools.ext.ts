@@ -25,25 +25,38 @@ async function post(path: string, body: Record<string, unknown>): Promise<{ ok: 
   }
 }
 
+const personRef = Type.Object({
+  openId: Type.String({ description: "Feishu open_id (ou_...)" }),
+  name: Type.String({ description: "Display name" }),
+});
+
+const audienceParam = Type.Optional(
+  Type.Object({
+    own: Type.Optional(Type.Array(personRef)),
+    drive: Type.Optional(Type.Array(personRef)),
+    track: Type.Optional(Type.Array(personRef)),
+  }),
+);
+
 const taskUpdate = defineTool({
   name: "task_update",
-  label: "Update task body",
+  label: "Update task",
   description:
-    "Write the task body back (goal / current progress / next step / recent notes). Pass the current version; the API bumps it. Use after each step so work can resume after an interruption.",
-  promptSnippet: "Update the task body after each step",
+    "Partial task update. Pass the current version; the API bumps it. Only fields you send change: body, followUp, and audience (own / drive / track). Omit a field to keep it. Omitted audience roles stay as they are.",
+  promptSnippet: "Update the task body or audience after each step",
   parameters: Type.Object({
     taskId: Type.String({ description: "Task id" }),
     version: Type.Number({ description: "Current task version from context" }),
-    body: Type.String({ description: "Updated task body" }),
-    followUp: Type.Optional(Type.Boolean({ description: "Whether follow-up checks stay on" })),
+    body: Type.Optional(Type.String({ description: "Updated task body. Omit to keep the current body." })),
+    followUp: Type.Optional(Type.Boolean({ description: "Whether follow-up checks stay on. Omit to leave unchanged." })),
+    audience: audienceParam,
   }),
   async execute(_id, params) {
-    const result = await post("/v1/task/update", {
-      taskId: params.taskId,
-      version: params.version,
-      body: params.body,
-      followUpEnabled: params.followUp ?? true,
-    });
+    const payload: Record<string, unknown> = { taskId: params.taskId, version: params.version };
+    if (params.body !== undefined) payload.body = params.body;
+    if (params.followUp !== undefined) payload.followUpEnabled = params.followUp;
+    if (params.audience !== undefined) payload.audience = params.audience;
+    const result = await post("/v1/task/update", payload);
     return { content: [{ type: "text", text: result.text }], details: { ok: result.ok } };
   },
 });
@@ -52,21 +65,24 @@ const taskComplete = defineTool({
   name: "task_complete",
   label: "Complete task step",
   description:
-    "Finish this turn's work: write the final body for this step via the task update API and turn follow-up off unless followUp is true. Then end your turn.",
+    "Finish this turn's work: write the final body for this step via the task update API and turn follow-up off unless followUp is true. Pass audience when the roles changed. Then end your turn.",
   promptSnippet: "Write the final body for this step and turn follow-up off",
   parameters: Type.Object({
     taskId: Type.String({ description: "Task id" }),
     version: Type.Number({ description: "Current task version from context" }),
     body: Type.String({ description: "Final task body for this step" }),
     followUp: Type.Optional(Type.Boolean({ description: "Keep follow-up on (default false)" })),
+    audience: audienceParam,
   }),
   async execute(_id, params) {
-    const result = await post("/v1/task/update", {
+    const payload: Record<string, unknown> = {
       taskId: params.taskId,
       version: params.version,
       body: params.body,
       followUpEnabled: params.followUp ?? false,
-    });
+    };
+    if (params.audience !== undefined) payload.audience = params.audience;
+    const result = await post("/v1/task/update", payload);
     return { content: [{ type: "text", text: result.text }], details: { ok: result.ok } };
   },
 });
@@ -74,7 +90,7 @@ const taskComplete = defineTool({
 const taskGet = defineTool({
   name: "task_get",
   label: "Get task",
-  description: "Read the current task record (body, version, status, follow-up).",
+  description: "Read the current task record (audience, body, version, status, follow-up).",
   promptSnippet: "Read the current task",
   parameters: Type.Object({
     taskId: Type.String({ description: "Task id" }),

@@ -5,6 +5,7 @@ export function heartbeatInstructions(): string {
     "The first line must be WAKE or QUIET.",
     "WAKE only when the user should hear about it or a new action should start now.",
     "QUIET when it can keep waiting.",
+    "Do not assign Own, Drive, or Track. Audience is not a reason to wake.",
     "Do not call tools.",
   ].join("\n");
 }

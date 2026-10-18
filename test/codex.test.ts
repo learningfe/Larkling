@@ -444,7 +444,7 @@ describe("Codex dynamicTools", () => {
     // Provide scripted replies via transport's test API if any — skip if MemoryCodexTransport is duplex queue
     // Minimal: just check dynamicToolsForKind export
     const { dynamicToolsForKind, FRONT_DYNAMIC_TOOLS, BACK_DYNAMIC_TOOLS } = await import("../src/runtimes/codex/dynamic-tools.js");
-    expect(dynamicToolsForKind("conversation")?.map((t) => t.name)).toEqual(["task_start", "task_cancel"]);
+    expect(dynamicToolsForKind("conversation")?.map((t) => t.name)).toEqual(["task_start", "task_update", "task_get", "task_cancel"]);
     expect(dynamicToolsForKind("task")?.length).toBe(BACK_DYNAMIC_TOOLS.length);
     expect(FRONT_DYNAMIC_TOOLS[0].type).toBe("function");
     runtime.close();
