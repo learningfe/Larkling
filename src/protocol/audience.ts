@@ -140,5 +140,5 @@ export function renderNotifyingReply(options: {
   if (options.scopeKind === "dm") return text;
   const prefix = renderAudienceMentions(options.audience, options.skipOpenIds);
   if (!prefix) return text;
-  return text ? `${prefix}\n${text}` : prefix;
+  return text ? `${prefix} ${text}` : prefix;
 }
