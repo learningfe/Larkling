@@ -20,6 +20,8 @@ describe("built-in prompts", () => {
     expect(text).toContain("Do not expose how you work");
     expect(text).toContain("Who was really @-mentioned is given by `mentions`");
     expect(text).toContain('<at user_id="ou_xxx">Name</at>');
+    expect(text).toContain("@all is not supported");
+    expect(text).toContain("Do not invent an open_id");
     expect(text).not.toContain("@bot");
     expect(text).toContain("Never claim to have done an action you did not actually perform");
     expect(text).not.toContain("I created a task");
@@ -36,6 +38,8 @@ describe("built-in prompts", () => {
     expect(text).toContain("Carol is Track");
     expect(text).toContain("im_history");
     expect(text).toContain("im_file");
+    expect(text).toContain("returned by person_lookup in this turn");
+    expect(text).toContain("@all is not supported");
     expect(text.toLowerCase()).not.toContain("bash");
     expect(text).not.toContain("larkling ");
   });
