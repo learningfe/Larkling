@@ -5,7 +5,7 @@ import { AsyncQueue } from "../../util/async-queue.js";
 import { RateLimiter } from "../../core/ratelimit.js";
 import { systemClock, type Clock } from "../../core/clock.js";
 import { approvalCard, feishuUuid } from "./card.js";
-import { millisToIso, normalizeFeishuMessage, type FeishuMention, type FeishuRawMessage } from "./content.js";
+import { mentionDisplayName, mentionOpenId, millisToIso, normalizeFeishuMessage, type FeishuMention, type FeishuRawMessage } from "./content.js";
 import { ffmpegToPcm, transcribeAudio, withTempPcm } from "./audio.js";
 import type { FeishuHttp, FeishuResponse } from "./http.js";
 
@@ -347,15 +347,13 @@ export class FeishuChannel implements ChannelAdapter {
         return typeof name === "string" ? name : undefined;
       },
       userName: async (openId) => {
-        const mention = mentions.find((item) => {
-          const id = item.id;
-          return (typeof id === "string" ? id : id?.open_id) === openId;
-        });
+        const mention = mentions.find((item) => mentionOpenId(item) === openId);
         const dm = message.chat_type === "p2p";
-        return this.displayNameFor(openId, { mentionName: mention?.name, chatId: dm ? undefined : String(message.chat_id ?? ""), dm });
+        return this.displayNameFor(openId, { mentionName: mention ? mentionDisplayName(mention) : undefined, chatId: dm ? undefined : String(message.chat_id ?? ""), dm });
       },
     });
-    const senderName = mentions.find((item) => mentionOpen(item) === (message.sender?.sender_id?.open_id || message.sender?.id))?.name ?? "";
+    const senderMention = mentions.find((item) => mentionOpenId(item) === (message.sender?.sender_id?.open_id || message.sender?.id));
+    const senderName = senderMention ? mentionDisplayName(senderMention) : "";
     const record: ImRecord = {
       messageId,
       scope: scopeFrom(message),
@@ -526,11 +524,6 @@ function actorFromIds(ids: Record<string, unknown>, senderType: string, name = "
   };
 }
 
-function mentionOpen(mention: FeishuMention): string | undefined {
-  if (typeof mention.id === "string") return mention.id;
-  return mention.id?.open_id;
-}
-
 function parseContent(message: FeishuRawMessage): Record<string, unknown> {
   const source = message.body?.content ?? message.content;
   if (typeof source === "string") {
@@ -586,10 +579,10 @@ function textOrUndefined(value: unknown): string | undefined {
 
 /**
  * Outbound text and post `md` render `<at>` as a real mention.
- * The host has already turned model-written tags into plain text and, when the
- * reply opted in, prepended one tag per audience member. This pass keeps only a
- * well-formed `ou_…` tag. `@all` and any other id become plain text, so a tag
- * that reached this layer cannot mention the whole chat or an arbitrary id.
+ * The host already keeps only a well-formed `ou_…` tag in group and topic
+ * replies, and turns every tag into plain text in a DM. This pass repeats that
+ * whitelist so a tag that reached this layer cannot mention the whole chat or
+ * an arbitrary id.
  */
 export function sanitizeAtTags(text: string): string {
   return text.replace(/<\s*at\b[^<>]*>([\s\S]*?)<\s*\/\s*at\s*>/gi, (whole, inner: string) => {

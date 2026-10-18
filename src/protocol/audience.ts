@@ -89,56 +89,28 @@ function cleanName(name: string): string {
   return name.replace(/[<>]/g, "").replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim();
 }
 
-/**
- * Feishu treats `<at user_id="ou_…">` and `<at user_id="all">` in outbound text as real
- * mentions. Model text is untrusted, so those tags become plain `@name` before the
- * harness inserts its own. Call this on the model text only, never on the prefix.
- */
-export function neutralizeUntrustedMentions(text: string): string {
-  const paired = /<\s*at\b([^<>]*)>([\s\S]*?)<\s*\/\s*at\s*>/gi;
-  return text
-    .replace(paired, (_whole, attrs: string, inner: string) => plainMention(attrs, inner))
-    .replace(/<\s*at\b[^<>]*>/gi, "")
-    .replace(/<\s*\/\s*at\s*>/gi, "");
-}
-
-function plainMention(attrs: string, inner: string): string {
-  const id = /\buser_id\s*=\s*["']?([^\s"'<>]+)/i.exec(attrs)?.[1] ?? "";
-  if (id === "all") return "@all";
-  const name = inner.replace(/<[^>]*>/g, "").trim();
-  return name ? `@${name}` : "";
-}
-
-/** Feishu mention tags in Own, Drive, Track order. Skips ids in `skipOpenIds` and repeats. */
-export function renderAudienceMentions(audience: TaskAudience | undefined, skipOpenIds: Iterable<string> = []): string {
-  const skip = new Set(skipOpenIds);
-  const people = storedAudience(audience);
-  const seen = new Set<string>();
-  const tags: string[] = [];
-  for (const person of [...people.own, ...people.drive, ...people.track]) {
-    if (!person || typeof person.openId !== "string" || !OPEN_ID.test(person.openId)) continue;
-    if (skip.has(person.openId) || seen.has(person.openId)) continue;
-    const name = cleanName(person.name ?? "");
-    if (!name) continue;
-    seen.add(person.openId);
-    tags.push(`<at user_id="${person.openId}">${name}</at>`);
-  }
-  return tags.join(" ");
-}
+const AT_TAG = /<\s*at\b([^<>]*)>([\s\S]*?)<\s*\/\s*at\s*>/gi;
+const KEPT_AT = /\u0000(\d+)\u0000/g;
 
 /**
- * Group and topic replies that opt in get the task audience prepended.
- * DMs keep the text and do not @.
+ * Model-written Feishu `<at>` tags. Group and topic replies keep a tag only when
+ * `user_id` is a well-formed `ou_` open id. `all` and any other id become plain
+ * text. A DM renders no real mention: every tag becomes plain text.
+ * Kept tags are held aside so the unpaired-tag sweep does not strip them.
  */
-export function renderNotifyingReply(options: {
-  text: string;
-  scopeKind: Scope["kind"];
-  audience?: TaskAudience;
-  skipOpenIds?: Iterable<string>;
-}): string {
-  const text = neutralizeUntrustedMentions(options.text);
-  if (options.scopeKind === "dm") return text;
-  const prefix = renderAudienceMentions(options.audience, options.skipOpenIds);
-  if (!prefix) return text;
-  return text ? `${prefix} ${text}` : prefix;
+export function renderOutboundMentions(text: string, scopeKind: Scope["kind"]): string {
+  const dm = scopeKind === "dm";
+  const kept: string[] = [];
+  const replaced = text.replace(AT_TAG, (_whole, attrs: string, inner: string) => {
+    const id = /\buser_id\s*=\s*["']?([^\s"'<>]+)/i.exec(attrs)?.[1] ?? "";
+    const name = cleanName(inner);
+    if (!dm && OPEN_ID.test(id)) {
+      kept.push(`<at user_id="${id}">${name}</at>`);
+      return `\u0000${kept.length - 1}\u0000`;
+    }
+    if (id === "all") return "@all";
+    return name ? `@${name}` : "";
+  });
+  const stripped = replaced.replace(/<\s*at\b[^<>]*>/gi, "").replace(/<\s*\/\s*at\s*>/gi, "");
+  return stripped.replace(KEPT_AT, (_mark, index: string) => kept[Number(index)] ?? "");
 }

@@ -25,7 +25,7 @@ import type {
   TurnInput,
 } from "../protocol/types.js";
 import { conversationSessionId, scopeKey, taskSessionId } from "../protocol/types.js";
-import { applyAudience, AudienceError, emptyAudience, neutralizeUntrustedMentions, readAudiencePatch, renderNotifyingReply, storedAudience } from "../protocol/audience.js";
+import { applyAudience, AudienceError, emptyAudience, readAudiencePatch, renderOutboundMentions, storedAudience } from "../protocol/audience.js";
 import { parseCheckReply, parseConversationReply, parseJudgeReply } from "../protocol/reply.js";
 import { buildSeed, transcriptTokens } from "../protocol/seed.js";
 import { renderEnvelope } from "../channels/envelope.js";
@@ -717,7 +717,7 @@ export class Host {
       let delivered = false;
       if (!suppress && reply.kind === "text" && session.scope) {
         const scope = session.scope;
-        const rendered = this.notifyingText(session, reply);
+        const rendered = this.outboundText(session, reply.text);
         reply = { ...reply, text: rendered };
         if (rendered.trim()) {
           await this.deliver({ type: "text", scope, text: rendered, replyTo: turn.messageIds.at(-1), idempotencyKey: newId() }, [scope], sessionId);
@@ -1413,26 +1413,10 @@ export class Host {
     await this.enqueue(sessionId, [{ kind: "prompt", text: prompt }]);
   }
 
-  /**
-   * Opt-in only. `[[notify <taskId>]]` selects a task this conversation owns.
-   * The @ list is that task's audience. Nothing is added from the turn.
-   */
-  private notifyingText(session: SessionRecord, reply: { text: string; notifyTaskId?: string }): string {
-    const scope = session.scope;
-    if (!scope) return neutralizeUntrustedMentions(reply.text);
-    const taskId = reply.notifyTaskId;
-    let audience: TaskRecord["audience"];
-    if (taskId) {
-      const task = this.stateStore.get().tasks[taskId];
-      if (task?.parentSessionId === session.sessionId) audience = task.audience;
-      else this.log.warn("notify.skipped", { taskId, sessionId: session.sessionId, reason: task ? "wrong-session" : "missing" });
-    }
-    return renderNotifyingReply({
-      text: reply.text,
-      scopeKind: scope.kind,
-      audience,
-      skipOpenIds: [this.bot.ref],
-    });
+  /** Keep model `<at>` tags only when the scope can mention and the id is `ou_…`. */
+  private outboundText(session: SessionRecord, text: string): string {
+    const kind = session.scope?.kind ?? "dm";
+    return renderOutboundMentions(text, kind);
   }
 
   async taskStart(token: string, body: TaskStartBody): Promise<TaskRecord> {
@@ -1650,9 +1634,12 @@ export class Host {
     const chatId = event.scope.kind === "topic" ? event.scope.parentId : event.scope.kind === "group" ? event.scope.id : undefined;
     try {
       if (chatId) void this.directory.touchGroup(chatId).catch(() => undefined);
-      if (event.actor.ref !== this.bot.ref && event.actor.name) await this.directory.observePerson(event.actor.ref, event.actor.name, chatId);
+      if (event.actor.ref !== this.bot.ref && event.actor.name) {
+        await this.directory.observePerson(event.actor.ref, event.actor.name, chatId, event.actor.isBot);
+      }
       for (const mention of event.mentions ?? []) {
-        if (mention.ref !== this.bot.ref) await this.directory.observePerson(mention.ref, mention.name, chatId);
+        if (!mention.ref || mention.ref === "all" || mention.ref === this.bot.ref) continue;
+        await this.directory.observePerson(mention.ref, mention.name, chatId, mention.isBot === true);
       }
     } catch (error) {
       this.log.warn("directory.observe_failed", { error: String(error) });

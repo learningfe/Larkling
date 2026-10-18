@@ -11,7 +11,9 @@ describe("built-in prompts", () => {
     expect(text).toContain("task_get");
     expect(text).toContain("task_cancel");
     expect(text).toContain("Alice is Own, Bob is Drive, Carol is Track");
-    expect(text).toContain("[[notify <taskId>]]");
+    expect(text).toContain("returned by person_lookup in this turn");
+    expect(text).toContain("You do not need to start a task first");
+    expect(text).not.toContain("[[notify");
     expect(text).toContain("still write the user-facing confirmation yourself");
     expect(text).toContain("Do not inspect source code, help output, or the file system");
     expect(text).toContain("say in plain words that you will look into it");
@@ -81,8 +83,9 @@ describe("directory prompts", async () => {
   it("gives lookups to back only", () => {
     const front = (frontInstructions as (...a: unknown[]) => string)("p", "", "bot");
     const back = backInstructions("p", "");
-    expect(front).not.toMatch(/person_lookup|who command/);
-    expect(front).toContain("叫上小赵");
+    expect(front).not.toMatch(/who command/);
+    expect(front).toContain("bring in Sam");
+    expect(front).toContain("returned by person_lookup in this turn");
     expect(back).toContain("person_lookup");
     expect(back).toContain("group_lookup");
     expect(back).toContain("ask the user which one");
