@@ -68,8 +68,8 @@ describe("audience normalization", () => {
       track: [carol, bob, bot],
     };
     const prefix = '<at user_id="ou_alice">Alice</at> <at user_id="ou_bob">Bob</at> <at user_id="ou_carol">Carol</at>';
-    expect(renderNotifyingReply({ text: "status", scopeKind: "group", audience, skipOpenIds: ["ou_bot"] })).toBe(`${prefix}\nstatus`);
-    expect(renderNotifyingReply({ text: "status", scopeKind: "topic", audience, skipOpenIds: ["ou_bot"] })).toBe(`${prefix}\nstatus`);
+    expect(renderNotifyingReply({ text: "status", scopeKind: "group", audience, skipOpenIds: ["ou_bot"] })).toBe(`${prefix} status`);
+    expect(renderNotifyingReply({ text: "status", scopeKind: "topic", audience, skipOpenIds: ["ou_bot"] })).toBe(`${prefix} status`);
     expect(renderNotifyingReply({ text: "status", scopeKind: "dm", audience, skipOpenIds: ["ou_bot"] })).toBe("status");
     expect(renderNotifyingReply({ text: "status", scopeKind: "group", audience: emptyAudience() })).toBe("status");
     expect(
@@ -79,7 +79,7 @@ describe("audience normalization", () => {
         audience: { own: [alice], drive: [], track: [] },
         skipOpenIds: ["ou_bot"],
       }),
-    ).toBe('<at user_id="ou_alice">Alice</at>\nsee @Evil @all');
+    ).toBe('<at user_id="ou_alice">Alice</at> see @Evil @all');
     expect(
       renderNotifyingReply({
         text: '<at user_id="ou_evil">Evil</at>',
@@ -271,7 +271,7 @@ describe("task audience", () => {
     reply = `launch is on\n[[notify ${started.json.taskId}]]`;
     await pushAndSettle(h, message({ text: "@bot status", messageId: "g4", scope, mentionsSelf: true }));
     const prefix = '<at user_id="ou_alice">Alice</at> <at user_id="ou_bob">Bob</at> <at user_id="ou_carol">Carol</at>';
-    expect(texts(h).at(-1)).toBe(`${prefix}\nlaunch is on`);
+    expect(texts(h).at(-1)).toBe(`${prefix} launch is on`);
     expect(h.runtime.starts.every((item) => !item.input.context.includes("ou_alice"))).toBe(true);
 
     reply = `[[notify ${started.json.taskId}]]\nstill talking`;
@@ -286,7 +286,7 @@ describe("task audience", () => {
 
     reply = `ping <at user_id="ou_evil">Evil</at> <at user_id='all'></at>\n[[notify ${started.json.taskId}]]`;
     await pushAndSettle(h, message({ text: "@bot inject", messageId: "g4d", scope, mentionsSelf: true }));
-    expect(texts(h).at(-1)).toBe(`${prefix}\nping @Evil @all`);
+    expect(texts(h).at(-1)).toBe(`${prefix} ping @Evil @all`);
     expect(texts(h).at(-1)).not.toContain("ou_evil");
 
     const other = groupScope("oc_other");
