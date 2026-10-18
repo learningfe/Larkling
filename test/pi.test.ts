@@ -1,9 +1,10 @@
-import {readFile, realpath} from "node:fs/promises";
+import { execFileSync, spawn } from "node:child_process";
+import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { JsonlSplitter, StdioPiProcess, type PiProcess, type PiSpawnOptions } from "../src/runtimes/pi/transport.js";
-import { PiRuntime, mapThinking, piArgs, toPiMessage } from "../src/runtimes/pi/adapter.js";
+import { JsonlSplitter, StdioPiProcess, type PiCloseOptions, type PiProcess, type PiSpawnOptions } from "../src/runtimes/pi/transport.js";
+import { PiRuntime, mapThinking, piArgs, toPiMessage, type PiRuntimeLog, type PiRuntimeOptions } from "../src/runtimes/pi/adapter.js";
 import { SEED_PREFACE } from "../src/runtimes/codex/adapter.js";
 import type { RuntimeEvent, SessionSpec, TurnInput } from "../src/protocol/types.js";
 import { AsyncQueue } from "../src/util/async-queue.js";
@@ -15,6 +16,8 @@ const FAKE = fileURLToPath(new URL("./fixtures/fake-pi.mjs", import.meta.url));
 class MemoryPi implements PiProcess {
   readonly sent: Record<string, unknown>[] = [];
   readonly queue = new AsyncQueue<unknown>();
+  readonly closes: Array<PiCloseOptions | undefined> = [];
+  stderr = "";
   closed = false;
   constructor(
     readonly options: PiSpawnOptions,
@@ -31,8 +34,9 @@ class MemoryPi implements PiProcess {
   messages(): AsyncIterable<unknown> {
     return this.queue;
   }
-  close(): void {
+  close(options?: PiCloseOptions): void {
     this.closed = true;
+    this.closes.push(options);
     this.queue.close();
   }
 }
@@ -75,18 +79,37 @@ async function collect(runtime: PiRuntime, until: (event: RuntimeEvent) => boole
   return events;
 }
 
-function memoryRuntime(handler = standard) {
+const silentLog: PiRuntimeLog = { warn() {}, error() {} };
+
+function memoryRuntime(handler = standard, overrides: Omit<Partial<PiRuntimeOptions>, "spawn"> & { stderr?: string } = {}) {
+  const { stderr, ...rest } = overrides;
   const spawned: MemoryPi[] = [];
   const runtime = new PiRuntime({
     sessionDir: "/state/pi",
     fileExists: async (path) => !path.includes("missing"),
+    ...rest,
     spawn: (options) => {
       const pi = new MemoryPi(options, handler);
+      if (stderr !== undefined) pi.stderr = stderr;
       spawned.push(pi);
       return pi;
     },
   });
   return { runtime, spawned };
+}
+
+function extensionArg(args: string[]): string {
+  return args[args.indexOf("--extension") + 1] ?? "";
+}
+
+/** Unblock a fifo reader, then give up so a missing reader cannot hang the test. */
+async function unblockFifo(path: string): Promise<void> {
+  const writer = spawn(process.execPath, ["-e", "require('fs').writeFileSync(process.argv[1], 'export default function () {}\\n')", path], { stdio: "ignore" });
+  await Promise.race([
+    new Promise((resolve) => writer.once("exit", resolve)),
+    new Promise((resolve) => setTimeout(resolve, 1000)),
+  ]);
+  if (writer.exitCode === null) writer.kill("SIGKILL");
 }
 
 describe("pi args", () => {
@@ -307,6 +330,7 @@ describe("PiRuntime", () => {
     await expect(runtime.start(conv, input())).rejects.toThrow(/unknown pi session/);
     await runtime.release(ref);
     expect(spawned[0].closed).toBe(true);
+    expect(spawned[0].closes.some((options) => options?.force)).toBe(false);
     expect(await runtime.updateInstructions(ref, "x")).toBe("unsupported");
     runtime.close();
   });
@@ -323,6 +347,157 @@ describe("PiRuntime", () => {
   });
 });
 
+describe("pi extension staging and timeout kill", () => {
+  it("copies the extension into stateDir and passes that path to pi", async () => {
+    const dir = await tempDir();
+    const source = join(dir, "install", "front-tools.ext.ts");
+    await mkdir(join(dir, "install"), { recursive: true });
+    const body = "export default function fresh() {}\n";
+    await writeFile(source, body);
+    const { runtime, spawned } = memoryRuntime(standard, { stateDir: dir, sessionDir: join(dir, "sessions"), frontToolsExtension: source });
+    await runtime.open(spec());
+    const ext = extensionArg(spawned[0].options.args);
+    expect(ext).toBe(join(dir, "pi-extensions", "front-tools.ext.ts"));
+    expect(await readFile(ext, "utf8")).toBe(body);
+    runtime.close();
+  });
+
+  it("fails the open without spawning when the install tree read does not finish", async () => {
+    const dir = await tempDir();
+    const fifo = join(dir, "front-tools.ext.ts");
+    execFileSync("mkfifo", [fifo]);
+    const logs: string[] = [];
+    const { runtime, spawned } = memoryRuntime(standard, {
+      stateDir: dir,
+      sessionDir: join(dir, "sessions"),
+      requestTimeoutMs: 200,
+      frontToolsExtension: fifo,
+      log: { warn() {}, error: (event) => logs.push(event) },
+    });
+    try {
+      await expect(runtime.open(spec())).rejects.toThrow(`timed out staging pi extension from ${fifo}`);
+      expect(spawned).toHaveLength(0);
+      expect(logs).toContain("pi.extension_stage_failed");
+      const started = Date.now();
+      await expect(runtime.open(spec({ sessionId: "s2" }))).rejects.toThrow(/timed out staging/);
+      expect(Date.now() - started).toBeLessThan(150);
+      expect(spawned).toHaveLength(0);
+    } finally {
+      await unblockFifo(fifo);
+      runtime.close();
+    }
+  });
+
+  it("reuses the previous staged copy when a later read of the install tree blocks", async () => {
+    const dir = await tempDir();
+    const fifo = join(dir, "front-tools.ext.ts");
+    execFileSync("mkfifo", [fifo]);
+    const dest = join(dir, "pi-extensions", "front-tools.ext.ts");
+    await mkdir(join(dir, "pi-extensions"), { recursive: true });
+    const body = "export default function staged() {}\n";
+    await writeFile(dest, body);
+    const warnings: Array<{ event: string; fields?: Record<string, unknown> }> = [];
+    const { runtime, spawned } = memoryRuntime(standard, {
+      stateDir: dir,
+      sessionDir: join(dir, "sessions"),
+      requestTimeoutMs: 200,
+      frontToolsExtension: fifo,
+      log: { warn: (event, fields) => warnings.push({ event, fields }), error() {} },
+    });
+    try {
+      const ref = await runtime.open(spec());
+      expect(ref).toBe("/state/pi/s1.jsonl");
+      expect(extensionArg(spawned[0].options.args)).toBe(dest);
+      expect(await readFile(dest, "utf8")).toBe(body);
+      expect(warnings.map((entry) => entry.event)).toContain("pi.extension_stale");
+    } finally {
+      await unblockFifo(fifo);
+      runtime.close();
+    }
+  });
+
+  it("logs stderr and the staged extension, then SIGKILLs, when get_state times out", async () => {
+    const dir = await tempDir();
+    const source = join(dir, "install", "front-tools.ext.ts");
+    await mkdir(join(dir, "install"), { recursive: true });
+    await writeFile(source, "export default function () {}\n");
+    const token = "session-token-value";
+    const logs: Array<{ event: string; fields?: Record<string, unknown> }> = [];
+    const { runtime, spawned } = memoryRuntime(() => undefined, {
+      stateDir: dir,
+      sessionDir: join(dir, "sessions"),
+      requestTimeoutMs: 40,
+      killGraceMs: 15,
+      frontToolsExtension: source,
+      stderr: `blocked while reading ${token}`,
+      log: { warn() {}, error: (event, fields) => logs.push({ event, fields }) },
+    });
+    await expect(runtime.open(spec({ toolEnv: { LARKLING_SESSION_TOKEN: token } }))).rejects.toThrow(/pi get_state timed out \(extension .+\/pi-extensions\/front-tools\.ext\.ts\)/);
+    expect(spawned[0].closes.some((options) => options?.force === true && options.graceMs === 15)).toBe(true);
+    const ext = extensionArg(spawned[0].options.args);
+    expect(ext).toBe(join(dir, "pi-extensions", "front-tools.ext.ts"));
+    expect(logs).toEqual([
+      {
+        event: "pi.rpc_timeout",
+        fields: {
+          command: "get_state",
+          extensions: [ext],
+          sources: [source],
+          stderr: "blocked while reading [redacted]",
+        },
+      },
+    ]);
+    expect(JSON.stringify(logs)).not.toContain(token);
+    runtime.close();
+  });
+
+  it("force-kills when a later RPC times out", async () => {
+    const { runtime, spawned } = memoryRuntime(
+      (pi, command) => {
+        if (command.type === "get_state") pi.push({ id: command.id, type: "response", success: true, data: { sessionFile: "/s/a.jsonl" } });
+      },
+      { requestTimeoutMs: 40, killGraceMs: 10, log: silentLog },
+    );
+    const ref = await runtime.open(spec({ kind: "judge" }));
+    await expect(runtime.start(ref, input())).rejects.toThrow(/pi prompt timed out/);
+    expect(spawned[0].closes.some((options) => options?.force === true && options.graceMs === 10)).toBe(true);
+    runtime.close();
+  });
+});
+
+describe("StdioPiProcess signals", () => {
+  it("stops at SIGTERM when the child exits", async () => {
+    const proc = new StdioPiProcess({ command: process.execPath, args: ["-e", "setInterval(() => {}, 1000)"] });
+    try {
+      proc.close();
+      await expect(proc.exited).resolves.toMatchObject({ signal: "SIGTERM" });
+    } finally {
+      proc.close({ force: true, graceMs: 0 });
+    }
+  });
+
+  it("sends SIGKILL after the grace period when the child ignores SIGTERM", async () => {
+    const dir = await tempDir();
+    const logPath = join(dir, "signals");
+    const proc = new StdioPiProcess({
+      command: process.execPath,
+      args: [
+        "-e",
+        "process.on('SIGTERM', () => require('fs').appendFileSync(process.env.SIGNAL_LOG, 'TERM\\n')); process.stdout.write('{\"ready\":true}\\n'); setInterval(() => {}, 1000)",
+      ],
+      env: { ...process.env, SIGNAL_LOG: logPath },
+    });
+    try {
+      await expect(proc.messages()[Symbol.asyncIterator]().next()).resolves.toMatchObject({ value: { ready: true } });
+      proc.close({ force: true, graceMs: 200 });
+      await expect(proc.exited).resolves.toMatchObject({ signal: "SIGKILL" });
+      expect(await readFile(logPath, "utf8")).toBe("TERM\n");
+    } finally {
+      proc.close({ force: true, graceMs: 0 });
+    }
+  });
+});
+
 describe("PiRuntime over a fake pi process", () => {
   it("runs a turn end to end over stdio", async () => {
     const dir = await tempDir();
@@ -331,6 +506,7 @@ describe("PiRuntime over a fake pi process", () => {
       command: process.execPath,
       args: [],
       sessionDir: join(dir, "sessions"),
+      stateDir: dir,
       provider: "openai-codex",
       env: { ...process.env, FAKE_PI_LOG: logPath },
       spawn: (options) => new StdioPiProcess({ ...options, args: [FAKE, ...options.args] }),
@@ -348,6 +524,10 @@ describe("PiRuntime over a fake pi process", () => {
     const first = JSON.parse((await readFile(logPath, "utf8")).split("\n")[0]) as { argv: string[]; cwd: string };
     expect(first.argv).toContain("--provider");
     expect(first.argv[first.argv.indexOf("--provider") + 1]).toBe("openai-codex");
+    const ext = extensionArg(first.argv);
+    expect(ext).toBe(join(dir, "pi-extensions", "front-tools.ext.ts"));
+    const source = fileURLToPath(new URL("../src/runtimes/pi/front-tools.ext.ts", import.meta.url));
+    expect(await readFile(ext, "utf8")).toBe(await readFile(source, "utf8"));
     expect(await realpath(first.cwd!)).toBe(await realpath(dir));
     runtime.close();
   });

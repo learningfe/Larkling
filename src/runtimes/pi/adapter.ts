@@ -1,12 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { access, readFile } from "node:fs/promises";
-import { extname, join } from "node:path";
+import { basename, extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { HealthItem, RuntimeAdapter, RuntimeEvent, RuntimeProfile, RuntimeRef, SessionSpec, TurnInput } from "../../protocol/types.js";
 import { AsyncQueue } from "../../util/async-queue.js";
+import { atomicWrite } from "../../util/fs.js";
 import { SteerRejected } from "../../core/errors.js";
 import { SEED_PREFACE } from "../codex/adapter.js";
-import { spawnPi, type PiProcess, type PiProcessFactory } from "./transport.js";
+import { PI_KILL_GRACE_MS, spawnPi, type PiProcess, type PiProcessFactory } from "./transport.js";
 
 export interface PiRuntimeOptions {
   command?: string;
@@ -20,12 +21,25 @@ export interface PiRuntimeOptions {
   spawn?: PiProcessFactory;
   /** Override for tests. Checks that a session file exists before resuming it. */
   fileExists?: (path: string) => Promise<boolean>;
-  /** Timeout for RPC command responses. */
+  /**
+   * Larkling state directory. Extension files are copied under `<stateDir>/pi-extensions`
+   * before spawn so pi does not open the install tree.
+   */
+  stateDir?: string;
+  /** Timeout for staging an extension and for each RPC command response. */
   requestTimeoutMs?: number;
+  /** SIGTERM-to-SIGKILL delay after an RPC timeout. */
+  killGraceMs?: number;
   /** Absolute path to the front-tools pi extension. Default: next to this module. */
   frontToolsExtension?: string;
   /** Absolute path to the back-tools pi extension. Default: next to this module. */
   backToolsExtension?: string;
+  log?: PiRuntimeLog;
+}
+
+export interface PiRuntimeLog {
+  warn(event: string, fields?: Record<string, unknown>): void;
+  error(event: string, fields?: Record<string, unknown>): void;
 }
 
 interface PiResponse {
@@ -53,9 +67,19 @@ interface SessionState {
   interrupted: boolean;
   /** Last assistant message seen in any agent_end of the current run. */
   lastAssistant?: Record<string, unknown>;
+  /** Paths passed to pi via --extension. */
+  extensions: string[];
+  /** Install-tree paths those extensions were copied from. */
+  extensionSources: string[];
+  /** Secret env values to strip from logged stderr. */
+  secrets: string[];
   pending: Map<string, { resolve: (value: PiResponse) => void; reject: (error: Error) => void }>;
   closing: boolean;
 }
+
+const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+/** One blocked install-tree read per source. A second read would take another libuv worker. */
+const pendingExtensionReads = new Map<string, Promise<void>>();
 
 const RETRYABLE = /overloaded|rate.?limit|429|5\d\d|timeout|ECONNRESET|ETIMEDOUT|network|fetch failed/i;
 const THINKING = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
@@ -86,12 +110,14 @@ export class PiRuntime implements RuntimeAdapter {
     if (session.runtimeRef && !ephemeral && !(await (this.options.fileExists ?? exists)(session.runtimeRef))) {
       throw new PiSessionMissing(session.runtimeRef);
     }
-    const toolsExtension =
+    const extensionSource =
       session.kind === "conversation"
         ? (this.options.frontToolsExtension ?? frontToolsExtensionPath())
         : session.kind === "task"
           ? (this.options.backToolsExtension ?? backToolsExtensionPath())
           : undefined;
+    const staged = await this.prepareExtension(extensionSource);
+    const toolsExtension = staged?.path;
     const args = piArgs({
       profile,
       instructions: session.instructions,
@@ -114,6 +140,9 @@ export class PiRuntime implements RuntimeAdapter {
       text: "",
       lastText: "",
       interrupted: false,
+      extensions: toolsExtension ? [toolsExtension] : [],
+      extensionSources: extensionSource ? [extensionSource] : [],
+      secrets: secretValues(env),
       pending: new Map(),
       closing: false,
     };
@@ -226,11 +255,15 @@ export class PiRuntime implements RuntimeAdapter {
 
   private request(state: SessionState, command: Record<string, unknown>): Promise<PiResponse> {
     const id = `lk-${this.nextId++}`;
-    const timeoutMs = this.options.requestTimeoutMs ?? 30_000;
+    const timeoutMs = this.options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+    const commandType = String(command.type);
     return new Promise<PiResponse>((resolve, reject) => {
       const timer = setTimeout(() => {
         state.pending.delete(id);
-        reject(new Error(`pi ${String(command.type)} timed out`));
+        this.reportTimeout(state, commandType);
+        // SIGTERM leaves a child blocked in open(); SIGKILL is what actually reaps it.
+        state.process.close({ force: true, graceMs: this.options.killGraceMs ?? PI_KILL_GRACE_MS });
+        reject(timeoutError(commandType, state.extensions));
       }, timeoutMs);
       timer.unref?.();
       state.pending.set(id, {
@@ -245,6 +278,40 @@ export class PiRuntime implements RuntimeAdapter {
       });
       state.process.send({ ...command, id });
     });
+  }
+
+  private async prepareExtension(source: string | undefined): Promise<{ path: string; fresh: boolean } | undefined> {
+    if (!source) return undefined;
+    const stateDir = this.options.stateDir;
+    if (!stateDir) return { path: source, fresh: true };
+    try {
+      const staged = await stagePiExtension(source, stateDir, this.options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS);
+      if (!staged.fresh) this.emit("warn", "pi.extension_stale", { source, extension: staged.path });
+      return staged;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.emit("error", "pi.extension_stage_failed", { source, error: message });
+      throw error;
+    }
+  }
+
+  private reportTimeout(state: SessionState, command: string): void {
+    this.lastError = `pi ${command} timed out`;
+    this.emit("error", "pi.rpc_timeout", {
+      command,
+      extensions: state.extensions,
+      sources: state.extensionSources,
+      stderr: redact(state.process.stderr ?? "", state.secrets).slice(-4000),
+    });
+  }
+
+  private emit(level: "warn" | "error", event: string, fields: Record<string, unknown>): void {
+    const log = this.options.log;
+    if (log) {
+      log[level](event, fields);
+      return;
+    }
+    process.stderr.write(`${JSON.stringify({ at: new Date().toISOString(), level, event, ...fields })}\n`);
   }
 
   private async readLoop(state: SessionState): Promise<void> {
@@ -399,6 +466,90 @@ export function piArgs(options: {
   }
   // `fast` has no pi equivalent and is ignored. `network` cannot be enforced; pi's bash tool is unsandboxed.
   return [...args, ...(options.extra ?? [])];
+}
+
+/**
+ * Copy a pi extension out of the install tree before spawn.
+ * pi loads `--extension` with a blocking read. When that path cannot be read
+ * (macOS ~/Downloads is one case), the child never answers get_state, and
+ * SIGTERM does not unblock the read. The copy lives under stateDir. A read
+ * that exceeds `timeoutMs` reuses the previous copy when one exists; otherwise
+ * the open fails instead of pointing pi back at the install tree. A read that
+ * is still stuck is not started again, so it cannot fill the libuv pool.
+ */
+export async function stagePiExtension(source: string, stateDir: string, timeoutMs: number): Promise<{ path: string; fresh: boolean }> {
+  const dest = join(stateDir, "pi-extensions", basename(source));
+  const key = `${stateDir}\0${source}`;
+  if (pendingExtensionReads.has(key)) return reuseStagedExtension(dest, source);
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const copy = (async () => {
+    const data = await readFile(source);
+    await atomicWrite(dest, data, 0o600);
+  })();
+  const settled = copy.then(
+    () => undefined,
+    () => undefined,
+  );
+  pendingExtensionReads.set(key, settled);
+  const release = () => {
+    if (pendingExtensionReads.get(key) === settled) pendingExtensionReads.delete(key);
+  };
+  const timeout = new Promise<"timeout">((resolve) => {
+    timer = setTimeout(() => resolve("timeout"), timeoutMs);
+    timer.unref?.();
+  });
+  try {
+    const outcome = await Promise.race([
+      copy.then(
+        () => "ok" as const,
+        (error: unknown) => ({ error }),
+      ),
+      timeout,
+    ]);
+    if (outcome === "ok") {
+      release();
+      return { path: dest, fresh: true };
+    }
+    if (outcome === "timeout") return reuseStagedExtension(dest, source);
+    release();
+    throw outcome.error instanceof Error ? outcome.error : new Error(String(outcome.error));
+  } finally {
+    if (timer) clearTimeout(timer);
+    void settled.then(release);
+  }
+}
+
+async function reuseStagedExtension(dest: string, source: string): Promise<{ path: string; fresh: boolean }> {
+  try {
+    await access(dest);
+    return { path: dest, fresh: false };
+  } catch {
+    throw new Error(`timed out staging pi extension from ${source}`);
+  }
+}
+
+function timeoutError(command: string, extensions: string[]): Error {
+  const where = extensions.length ? ` (extension ${extensions.join(", ")})` : "";
+  return new Error(`pi ${command} timed out${where}`);
+}
+
+function secretValues(env: NodeJS.ProcessEnv): string[] {
+  const values: string[] = [];
+  for (const [key, value] of Object.entries(env)) {
+    if (!value || value.length < 8) continue;
+    if (/TOKEN|SECRET|PASSWORD|CREDENTIAL/i.test(key)) values.push(value);
+  }
+  return values;
+}
+
+function redact(text: string, secrets: string[]): string {
+  let out = text;
+  for (const secret of secrets) {
+    if (!secret) continue;
+    out = out.split(secret).join("[redacted]");
+  }
+  return out;
 }
 
 export function frontToolsExtensionPath(): string {
