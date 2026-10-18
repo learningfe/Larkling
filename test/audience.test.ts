@@ -6,7 +6,7 @@ import { StateStore } from "../src/core/state.js";
 import { Logger } from "../src/log.js";
 import { MemoryChannel } from "../src/channels/memory.js";
 import { ManualClock } from "../src/core/clock.js";
-import { applyAudience, canonicalAudience, emptyAudience, neutralizeUntrustedMentions, readAudiencePatch, renderAudienceMentions, renderNotifyingReply, storedAudience } from "../src/protocol/audience.js";
+import { applyAudience, canonicalAudience, emptyAudience, readAudiencePatch, renderOutboundMentions, storedAudience } from "../src/protocol/audience.js";
 import { parseConversationReply } from "../src/protocol/reply.js";
 import type { TaskRecord } from "../src/protocol/types.js";
 import { ScriptedRuntime } from "../src/runtimes/scripted.js";
@@ -61,56 +61,21 @@ describe("audience normalization", () => {
     expect(() => readAudiencePatch({ owner: [] })).toThrow(/unknown audience field/);
   });
 
-  it("renders Own, Drive, Track, drops duplicates and the bot, and leaves DMs bare", () => {
-    const audience = {
-      own: [alice, bot],
-      drive: [bob, alice],
-      track: [carol, bob, bot],
-    };
-    const prefix = '<at user_id="ou_alice">Alice</at> <at user_id="ou_bob">Bob</at> <at user_id="ou_carol">Carol</at>';
-    expect(renderNotifyingReply({ text: "status", scopeKind: "group", audience, skipOpenIds: ["ou_bot"] })).toBe(`${prefix} status`);
-    expect(renderNotifyingReply({ text: "status", scopeKind: "topic", audience, skipOpenIds: ["ou_bot"] })).toBe(`${prefix} status`);
-    expect(renderNotifyingReply({ text: "status", scopeKind: "dm", audience, skipOpenIds: ["ou_bot"] })).toBe("status");
-    expect(renderNotifyingReply({ text: "status", scopeKind: "group", audience: emptyAudience() })).toBe("status");
-    expect(
-      renderNotifyingReply({
-        text: 'see <at user_id="ou_evil">Evil</at> <at user_id="all"></at>',
-        scopeKind: "group",
-        audience: { own: [alice], drive: [], track: [] },
-        skipOpenIds: ["ou_bot"],
-      }),
-    ).toBe('<at user_id="ou_alice">Alice</at> see @Evil @all');
-    expect(
-      renderNotifyingReply({
-        text: '<at user_id="ou_evil">Evil</at>',
-        scopeKind: "dm",
-        audience: { own: [alice], drive: [], track: [] },
-      }),
-    ).toBe("@Evil");
-    expect(renderAudienceMentions({ own: [{ openId: "ou_alice", name: "Al<ice>\nEve" }], drive: [], track: [] })).toBe(
-      '<at user_id="ou_alice">Alice Eve</at>',
-    );
-    expect(renderAudienceMentions({ own: [{ openId: '"><at user_id="all">', name: "X" }], drive: [], track: [] })).toBe("");
-    expect(neutralizeUntrustedMentions(`<at user_id='ou_evil'>Evil</at> <AT user_id="all"></AT>`)).toBe("@Evil @all");
-    expect(neutralizeUntrustedMentions('before <at user_id="ou_evil">')).toBe("before ");
+  it("keeps well-formed model mention tags and downgrades the rest", () => {
+    const tags = '<at user_id="ou_alice">Alice</at> <at user_id="ou_bob">Bob</at> <at user_id="ou_carol">Carol</at>';
+    expect(renderOutboundMentions(`${tags} status`, "group")).toBe(`${tags} status`);
+    expect(renderOutboundMentions(`${tags} status`, "topic")).toBe(`${tags} status`);
+    expect(renderOutboundMentions('<at user_id="ou_alice">Alice</at> status', "dm")).toBe("@Alice status");
+    expect(renderOutboundMentions('see <at user_id="on_evil">Evil</at> <at user_id="all"></at>', "group")).toBe("see @Evil @all");
+    expect(renderOutboundMentions('<at user_id="ou_alice">Al<ice>\nEve</at>', "group")).toBe('<at user_id="ou_alice">Alice Eve</at>');
+    expect(renderOutboundMentions('before <at user_id="ou_alice">', "group")).toBe("before ");
+    expect(renderOutboundMentions(`<at user_id='ou_alice'>Alice</at> <AT user_id="all"></AT>`, "dm")).toBe("@Alice @all");
   });
 
-  it("strips a notify line without taking people from it", () => {
+  it("leaves a notify line as ordinary text", () => {
     expect(parseConversationReply("hello")).toEqual({ kind: "text", text: "hello" });
     expect(parseConversationReply("  [[silent]]  ")).toEqual({ kind: "silent" });
-    expect(parseConversationReply("status\n[[notify task_1]]")).toEqual({ kind: "text", text: "status", notifyTaskId: "task_1" });
-    expect(parseConversationReply("status\r\n[[notify task_1]]\r\n")).toEqual({ kind: "text", text: "status", notifyTaskId: "task_1" });
-    expect(parseConversationReply("status\n[[notify task_a]]\n[[notify task_b]]")).toEqual({
-      kind: "text",
-      text: "status",
-      notifyTaskId: "task_b",
-    });
-    expect(parseConversationReply("say [[notify task_a]] inline\n[[notify task_b]]")).toEqual({
-      kind: "text",
-      text: "say [[notify task_a]] inline",
-      notifyTaskId: "task_b",
-    });
-    expect(parseConversationReply("[[notify task_1]]\n\nstatus")).toEqual({ kind: "text", text: "[[notify task_1]]\n\nstatus" });
+    expect(parseConversationReply("status\n[[notify task_1]]")).toEqual({ kind: "text", text: "status\n[[notify task_1]]" });
     expect(parseConversationReply("say [[notify task_1]] inline")).toEqual({ kind: "text", text: "say [[notify task_1]] inline" });
   });
 });
@@ -208,7 +173,7 @@ describe("task audience", () => {
     await host.stop();
   });
 
-  it("does not invent audience, @s in order only when asked, and does not @ in a DM", async () => {
+  it("renders model mention tags through the whitelist and does not @ from a task audience", async () => {
     const h = await startHarness();
     const scope = groupScope("oc_matter");
     h.channel.histories.set(scope.id, [
@@ -238,10 +203,9 @@ describe("task audience", () => {
     await pushAndSettle(h, message({ text: "@bot", messageId: "g1", scope, mentionsSelf: true }));
     expect(texts(h)).toEqual(["hello"]);
 
-    reply = 'hi <at user_id="ou_evil">Evil</at> <at user_id="all"></at>';
+    reply = 'hi <at user_id="ou_alice">Alice</at> <at user_id="on_evil">Evil</at> <at user_id="all"></at>';
     await pushAndSettle(h, message({ text: "@bot tags", messageId: "g1b", scope, mentionsSelf: true }));
-    expect(texts(h).at(-1)).toBe("hi @Evil @all");
-    expect(texts(h).at(-1)).not.toContain("<at");
+    expect(texts(h).at(-1)).toBe('hi <at user_id="ou_alice">Alice</at> @Evil @all');
 
     const parent = Object.values(h.host.snapshot().sessions).find((session) => session.kind === "conversation");
     if (!parent) throw new Error("missing conversation");
@@ -252,9 +216,9 @@ describe("task audience", () => {
 
     reply = `noted\n[[notify ${started.json.taskId}]]`;
     await pushAndSettle(h, message({ text: "@bot again", messageId: "g2", scope, mentionsSelf: true }));
-    expect(texts(h).at(-1)).toBe("noted");
-    expect(texts(h).join("\n")).not.toContain("<at ");
-    expect(h.runtime.starts.every((item) => !item.input.context.includes("ou_alice"))).toBe(true);
+    expect(texts(h).at(-1)).toBe(`noted\n[[notify ${started.json.taskId}]]`);
+    expect(texts(h).at(-1)).not.toContain("<at");
+    expect(h.runtime.starts.every((item) => !item.input.context.includes("ou_carol"))).toBe(true);
 
     const version = h.host.snapshot().tasks[started.json.taskId].version;
     const patched = await post(h.host.apiUrl, parent.token, "/v1/task/update", {
@@ -268,26 +232,14 @@ describe("task audience", () => {
     await pushAndSettle(h, message({ text: "@bot chat", messageId: "g3", scope, mentionsSelf: true }));
     expect(texts(h).at(-1)).toBe("just chatting");
 
-    reply = `launch is on\n[[notify ${started.json.taskId}]]`;
+    reply = '<at user_id="ou_carol">Carol</at> <at user_id="ou_alice">Alice</at> launch is on';
     await pushAndSettle(h, message({ text: "@bot status", messageId: "g4", scope, mentionsSelf: true }));
-    const prefix = '<at user_id="ou_alice">Alice</at> <at user_id="ou_bob">Bob</at> <at user_id="ou_carol">Carol</at>';
-    expect(texts(h).at(-1)).toBe(`${prefix} launch is on`);
-    expect(h.runtime.starts.every((item) => !item.input.context.includes("ou_alice"))).toBe(true);
+    expect(texts(h).at(-1)).toBe('<at user_id="ou_carol">Carol</at> <at user_id="ou_alice">Alice</at> launch is on');
 
-    reply = `[[notify ${started.json.taskId}]]\nstill talking`;
-    await pushAndSettle(h, message({ text: "@bot mid", messageId: "g4b", scope, mentionsSelf: true }));
-    expect(texts(h).at(-1)).toBe(`[[notify ${started.json.taskId}]]\nstill talking`);
-    expect(texts(h).at(-1)).not.toContain("<at");
-
-    reply = "lost\n[[notify missing_task]]";
-    await pushAndSettle(h, message({ text: "@bot missing", messageId: "g4c", scope, mentionsSelf: true }));
-    expect(texts(h).at(-1)).toBe("lost");
-    expect(texts(h).at(-1)).not.toContain("<at");
-
-    reply = `ping <at user_id="ou_evil">Evil</at> <at user_id='all'></at>\n[[notify ${started.json.taskId}]]`;
+    reply = `ping <at user_id="not-an-id">Evil</at> <at user_id='all'></at>`;
     await pushAndSettle(h, message({ text: "@bot inject", messageId: "g4d", scope, mentionsSelf: true }));
-    expect(texts(h).at(-1)).toBe(`${prefix} ping @Evil @all`);
-    expect(texts(h).at(-1)).not.toContain("ou_evil");
+    expect(texts(h).at(-1)).toBe("ping @Evil @all");
+    expect(texts(h).at(-1)).not.toContain("<at");
 
     const other = groupScope("oc_other");
     await pushAndSettle(h, message({ text: "@bot", messageId: "o1", scope: other, mentionsSelf: true }));
@@ -299,12 +251,12 @@ describe("task audience", () => {
     });
     expect(otherTask.status).toBe(200);
     await h.host.settle();
-    reply = `nope\n[[notify ${otherTask.json.taskId}]]`;
+    reply = "nope";
     await pushAndSettle(h, message({ text: "@bot wrong", messageId: "g4e", scope, mentionsSelf: true }));
     expect(texts(h).at(-1)).toBe("nope");
     expect(texts(h).join("\n")).not.toContain("ou_erin");
 
-    reply = `dm update\n[[notify ${started.json.taskId}]]`;
+    reply = '<at user_id="ou_alice">Alice</at> dm update';
     await pushAndSettle(h, message({ text: "ping", messageId: "d1" }));
     const dmParent = Object.values(h.host.snapshot().sessions).find((session) => session.scope?.kind === "dm");
     if (!dmParent) throw new Error("missing dm");
@@ -314,9 +266,9 @@ describe("task audience", () => {
     });
     expect(dmTask.status).toBe(200);
     await h.host.settle();
-    reply = `dm update\n[[notify ${dmTask.json.taskId}]]`;
+    reply = '<at user_id="ou_alice">Alice</at> dm update';
     await pushAndSettle(h, message({ text: "ping again", messageId: "d2" }));
-    expect(texts(h).at(-1)).toBe("dm update");
+    expect(texts(h).at(-1)).toBe("@Alice dm update");
     expect(h.host.snapshot().tasks[dmTask.json.taskId].audience).toEqual({ own: [alice], drive: [bob], track: [carol] });
   });
 

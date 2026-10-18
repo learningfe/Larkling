@@ -30,7 +30,9 @@ describe("built-in prompts", () => {
     expect(text).toContain("task_get");
     expect(text).toContain("task_cancel");
     expect(text).toContain("Alice is Own, Bob is Drive, Carol is Track");
-    expect(text).toContain("[[notify <taskId>]]");
+    expect(text).toContain("returned by person_lookup in this turn");
+    expect(text).toContain("You do not need to start a task first");
+    expect(text).not.toContain("[[notify");
     expect(text).toContain("still write the user-facing confirmation yourself");
     expect(text).toContain("Do not inspect source code, help output, or the file system");
     expect(text).toContain("say in plain words that you will look into it");
@@ -48,7 +50,7 @@ describe("built-in prompts", () => {
     expect(text.toLowerCase()).not.toContain("bash");
     expect(text).not.toContain("task cancel command");
     expect(text).toContain("bring in Sam");
-    expect(text).not.toMatch(/person_lookup|who command/);
+    expect(text).not.toMatch(/who command/);
   });
 
   it("names back tools without mentioning bash or the CLI", () => {

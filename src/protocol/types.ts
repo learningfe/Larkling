@@ -36,6 +36,11 @@ export interface Person {
   lastSeenAt: string;
   /** Platform refs (Feishu open_id), most recent first. Not used as identity. */
   refs: string[];
+  /**
+   * True when this record was seen as a bot. Omitted on older files; readers treat that as false.
+   * A later human sighting does not clear it.
+   */
+  isBot?: boolean;
 }
 
 export type AttachmentKind = "image" | "file" | "audio" | "video";
@@ -50,6 +55,8 @@ export interface AttachmentRef {
 export interface MentionRef {
   ref: string;
   name: string;
+  /** From Feishu `mentioned_type: bot`. Omitted means a person. */
+  isBot?: boolean;
 }
 
 export type MessageDisposition = "normal" | "store_only" | "unsupported";
@@ -91,7 +98,7 @@ export type ChannelEvent =
       actor: Actor;
       decision: "approve" | "deny";
     }
-  | { type: "names"; entries: { stableId: string; ref: string; name: string }[] }
+  | { type: "names"; entries: { stableId: string; ref: string; name: string; isBot?: boolean }[] }
   /** Group info changed (Feishu `im.chat.updated_v1`). */
   | { type: "chat_updated"; chatId: string; name?: string };
 
@@ -137,7 +144,7 @@ export type TranscriptWrite = {
   };
 }[TranscriptEntry["type"]];
 
-export type FinalReply = { kind: "text"; text: string; notifyTaskId?: string } | { kind: "silent" };
+export type FinalReply = { kind: "text"; text: string } | { kind: "silent" };
 
 export type RuntimeRef = string;
 

@@ -8,8 +8,12 @@ import { feishuUuid } from "../src/channels/feishu/card.js";
 import { normalizeFeishuMessage, type FeishuRawMessage, type NormalizeContext } from "../src/channels/feishu/content.js";
 import type { FeishuHttp, FeishuResponse } from "../src/channels/feishu/http.js";
 import { ManualClock } from "../src/core/clock.js";
+import { createHost } from "../src/core/host.js";
 import { RateLimiter } from "../src/core/ratelimit.js";
+import { Logger } from "../src/log.js";
 import type { ChannelEvent } from "../src/protocol/types.js";
+import { ScriptedRuntime } from "../src/runtimes/scripted.js";
+import { post, tempDir, testConfig } from "./helpers.js";
 
 class FakeHttp implements FeishuHttp {
   readonly calls: { method: string; path: string; query?: Record<string, string | undefined>; json?: unknown }[] = [];
@@ -56,7 +60,7 @@ describe("feishu message normalization", () => {
     expect(text.text).toBe('hi <at user_id="ou_bot">Bot</at> <at user_id="all"></at>');
     expect(text.mentionsSelf).toBe(true);
     expect(text.mentionsOthers).toBe(true);
-    expect(text.names).toEqual([{ stableId: "feishu:ou_bot", ref: "ou_bot", name: "Bot" }]);
+    expect(text.names).toEqual([{ stableId: "feishu:ou_bot", ref: "ou_bot", name: "Bot", isBot: false }]);
 
     const post = await normalize(
       raw({
@@ -607,5 +611,63 @@ describe("feishu directory", () => {
       channel.ingest({ header: { event_type: "im.chat.updated_v1" }, event: { chat_id: "oc_1", after_change: { name: "新群名" }, before_change: { name: "旧" } } }),
     );
     expect(events).toEqual([{ type: "chat_updated", chatId: "oc_1", name: "新群名" }]);
+  });
+
+  it("upserts inbound mentions, including another bot, into the person directory", async () => {
+    const dir = await tempDir();
+    const http = new FakeHttp();
+    const clock = new ManualClock(Date.parse("2026-03-15T02:00:00.000Z"));
+    const channel = new FeishuChannel({
+      http,
+      botOpenId: "ou_bot",
+      readGroupMessages: true,
+      stateDir: dir,
+      ratePerSecond: 1000,
+      clock,
+    });
+    const runtime = new ScriptedRuntime("codex");
+    runtime.handler = async (turn) => turn.emit({ type: "turn.completed", text: "ok" });
+    const host = await createHost({
+      config: await testConfig(dir),
+      channel,
+      runtimes: new Map([["codex", runtime]]),
+      clock,
+      logger: new Logger(undefined, "error"),
+      bot: { ref: "ou_bot", stableId: "feishu:ou_bot", name: "Larkling" },
+      timers: false,
+    });
+    await host.start();
+    try {
+      await channel.ingest({
+        header: { event_id: "e-mentions", event_type: "im.message.receive_v1" },
+        event: {
+          sender: { sender_type: "user", sender_id: { open_id: "ou_owner" } },
+          message: {
+            message_id: "om_mentions",
+            chat_id: "oc_1",
+            chat_type: "group",
+            message_type: "text",
+            content: JSON.stringify({ text: "@_user_1 @_user_2 @_user_3 hi" }),
+            mentions: [
+              { key: "@_user_1", id: "ou_sam", nickname: "Sammy", mentioned_type: "user" },
+              { key: "@_user_2", openId: "ou_other", name: "OtherBot", mentioned_type: "bot" },
+              { key: "@_user_3", id: { open_id: "ou_bot" }, name: "Larkling", mentioned_type: "bot" },
+            ],
+            create_time: "1710000000000",
+          },
+        },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await host.settle();
+      const sam = await post(host.apiUrl, host.ownerToken, "/v1/person/lookup", { openId: "ou_sam", scope: "all" });
+      expect(sam.status).toBe(200);
+      expect(sam.json.matches[0]).toMatchObject({ openId: "ou_sam", name: "Sammy", isBot: false });
+      const other = await post(host.apiUrl, host.ownerToken, "/v1/person/lookup", { openId: "ou_other", scope: "all" });
+      expect(other.json.matches[0]).toMatchObject({ openId: "ou_other", name: "OtherBot", isBot: true });
+      const self = await post(host.apiUrl, host.ownerToken, "/v1/person/lookup", { openId: "ou_bot", scope: "all" });
+      expect(self.json.matches).toEqual([]);
+    } finally {
+      await host.stop();
+    }
   });
 });
