@@ -66,8 +66,9 @@ function usage(): string {
 async function start(configPath?: string): Promise<void> {
   const loaded = await loadConfig(configPath ?? defaultConfigPath());
   const opened = await openChannel(loaded);
-  const runtimes = buildRuntimes(opened.config);
-  const host = await createHost({ config: opened.config, channel: opened.channel, runtimes, timers: true, bot: opened.bot });
+  const log = new Logger(join(opened.config.stateDir, "log.jsonl"), "info");
+  const runtimes = buildRuntimes(opened.config, log);
+  const host = await createHost({ config: opened.config, channel: opened.channel, runtimes, timers: true, bot: opened.bot, logger: log });
   await host.start();
   if (opened.config.channel.kind === "feishu" && opened.channel instanceof FeishuChannel) {
     await startFeishuSocket({ appId: opened.config.channel.appId, appSecret: opened.config.channel.appSecret, channel: opened.channel });
@@ -293,7 +294,7 @@ async function openChannel(config: LarklingConfig): Promise<{ config: LarklingCo
   return { config: next, channel, bot };
 }
 
-function buildRuntimes(config: LarklingConfig): Map<string, RuntimeAdapter> {
+function buildRuntimes(config: LarklingConfig, log?: Logger): Map<string, RuntimeAdapter> {
   const names = new Set([config.agents.front.runtime, config.agents.back.runtime]);
   const runtimes = new Map<string, RuntimeAdapter>();
   for (const name of names) {
@@ -303,7 +304,7 @@ function buildRuntimes(config: LarklingConfig): Map<string, RuntimeAdapter> {
     }
     if (name === "pi") {
       const pi = config.runtimes.pi ?? { command: "pi", args: [] as string[], provider: undefined, sessionDir: join(config.stateDir, "pi-sessions") };
-      runtimes.set("pi", new PiRuntime({ command: pi.command, args: pi.args, provider: pi.provider, sessionDir: pi.sessionDir }));
+      runtimes.set("pi", new PiRuntime({ command: pi.command, args: pi.args, provider: pi.provider, sessionDir: pi.sessionDir, stateDir: config.stateDir, log }));
       continue;
     }
     if (name === "dsh") createDshRuntime();

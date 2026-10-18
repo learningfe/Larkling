@@ -1,11 +1,22 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { AsyncQueue } from "../../util/async-queue.js";
 
+/** SIGTERM does not unblock a read stuck in the kernel; SIGKILL does. */
+export const PI_KILL_GRACE_MS = 1_000;
+
+export interface PiCloseOptions {
+  /** After SIGTERM, send SIGKILL if the child is still alive when the grace period ends. */
+  force?: boolean;
+  graceMs?: number;
+}
+
 /** One `pi --mode rpc` process. Messages are JSON objects, one per LF-terminated line. */
 export interface PiProcess {
   send(message: unknown): void;
   messages(): AsyncIterable<unknown>;
-  close(): void;
+  /** Tail of child stderr, when the process records it. */
+  stderr?: string;
+  close(options?: PiCloseOptions): void;
 }
 
 export interface PiSpawnOptions {
@@ -47,6 +58,8 @@ export class StdioPiProcess implements PiProcess {
   private readonly queue = new AsyncQueue<unknown>();
   private readonly child: ChildProcessWithoutNullStreams;
   private readonly splitter = new JsonlSplitter();
+  private killTimer?: ReturnType<typeof setTimeout>;
+  readonly exited: Promise<{ code: number | null; signal: NodeJS.Signals | null }>;
   stderr = "";
 
   constructor(options: PiSpawnOptions) {
@@ -54,6 +67,10 @@ export class StdioPiProcess implements PiProcess {
       cwd: options.cwd,
       env: options.env ?? process.env,
       stdio: ["pipe", "pipe", "pipe"],
+    });
+    this.exited = new Promise((resolve) => {
+      this.child.on("exit", (code, signal) => resolve({ code, signal }));
+      this.child.on("error", () => resolve({ code: null, signal: null }));
     });
     this.child.stdout.setEncoding("utf8");
     this.child.stdout.on("data", (chunk: string) => {
@@ -65,7 +82,11 @@ export class StdioPiProcess implements PiProcess {
       this.stderr = (this.stderr + chunk).slice(-4000);
     });
     this.child.stdin.on("error", () => undefined);
-    this.child.on("exit", () => this.queue.close());
+    this.child.on("exit", () => {
+      if (this.killTimer) clearTimeout(this.killTimer);
+      this.killTimer = undefined;
+      this.queue.close();
+    });
     this.child.on("error", () => this.queue.close());
   }
 
@@ -77,9 +98,30 @@ export class StdioPiProcess implements PiProcess {
     return this.queue;
   }
 
-  close(): void {
-    this.child.kill();
+  close(options?: PiCloseOptions): void {
+    this.terminate(options);
     this.queue.close();
+  }
+
+  private terminate(options?: PiCloseOptions): void {
+    if (this.child.exitCode !== null || this.child.signalCode !== null) return;
+    try {
+      this.child.kill("SIGTERM");
+    } catch {
+      return;
+    }
+    if (!options?.force || this.killTimer) return;
+    const graceMs = options.graceMs ?? PI_KILL_GRACE_MS;
+    this.killTimer = setTimeout(() => {
+      this.killTimer = undefined;
+      if (this.child.exitCode !== null || this.child.signalCode !== null) return;
+      try {
+        this.child.kill("SIGKILL");
+      } catch {
+        // The child exited between the check and the signal.
+      }
+    }, graceMs);
+    this.killTimer.unref?.();
   }
 }
 
