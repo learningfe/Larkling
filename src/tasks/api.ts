@@ -2,10 +2,26 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import type { TaskRecord } from "../protocol/types.js";
 import { ApiError } from "../core/errors.js";
 
+export interface TaskStartBody {
+  body: string;
+  followUpEnabled?: boolean;
+  /** Omitted means an empty audience. The handler does not fill it. */
+  audience?: unknown;
+}
+
+/** Partial: only keys present in the JSON object are applied. */
+export interface TaskUpdateBody {
+  taskId: string;
+  version: number;
+  body?: string;
+  followUpEnabled?: boolean;
+  audience?: unknown;
+}
+
 export interface ApiHandlers {
-  taskStart(token: string, body: { body: string; followUpEnabled?: boolean }): Promise<TaskRecord>;
+  taskStart(token: string, body: TaskStartBody): Promise<TaskRecord>;
   taskContinue(token: string, body: { taskId: string; message: string }): Promise<TaskRecord>;
-  taskUpdate(token: string, body: { taskId: string; version: number; body: string; followUpEnabled: boolean }): Promise<TaskRecord>;
+  taskUpdate(token: string, body: TaskUpdateBody): Promise<TaskRecord>;
   taskGet(token: string, taskId: string): Promise<unknown>;
   taskList(token: string): Promise<unknown>;
   taskCancel(token: string, taskId: string): Promise<TaskRecord>;
@@ -37,13 +53,13 @@ async function handle(req: IncomingMessage, res: ServerResponse, handlers: ApiHa
     let payload: unknown;
     switch (route) {
       case "POST /v1/task/start":
-        payload = await handlers.taskStart(token, body as { body: string; followUpEnabled?: boolean });
+        payload = await handlers.taskStart(token, body as TaskStartBody);
         break;
       case "POST /v1/task/continue":
         payload = await handlers.taskContinue(token, body as { taskId: string; message: string });
         break;
       case "POST /v1/task/update":
-        payload = await handlers.taskUpdate(token, body as { taskId: string; version: number; body: string; followUpEnabled: boolean });
+        payload = await handlers.taskUpdate(token, body as TaskUpdateBody);
         break;
       case "POST /v1/task/get":
         payload = await handlers.taskGet(token, String((body as { taskId?: string }).taskId ?? ""));

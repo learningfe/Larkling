@@ -26,7 +26,11 @@ describe("built-in prompts", () => {
     expect(text).toContain("under You");
     expect(text).not.toContain("Your name is");
     expect(text).toContain("task_start");
+    expect(text).toContain("task_update");
+    expect(text).toContain("task_get");
     expect(text).toContain("task_cancel");
+    expect(text).toContain("Alice is Own, Bob is Drive, Carol is Track");
+    expect(text).toContain("[[notify <taskId>]]");
     expect(text).toContain("still write the user-facing confirmation yourself");
     expect(text).toContain("Do not inspect source code, help output, or the file system");
     expect(text).toContain("say in plain words that you will look into it");
@@ -35,6 +39,8 @@ describe("built-in prompts", () => {
     expect(text).toContain("Do not expose how you work");
     expect(text).toContain("Who was really @-mentioned is given by `mentions`");
     expect(text).toContain('<at user_id="ou_xxx">Name</at>');
+    expect(text).toContain("@all is not supported");
+    expect(text).toContain("Do not invent an open_id");
     expect(text).not.toContain("@bot");
     expect(text).toContain("Never claim to have done an action you did not actually perform");
     expect(text).not.toContain("I created a task");
@@ -49,11 +55,15 @@ describe("built-in prompts", () => {
     const text = backInstructions();
     expect(text).toContain("task_update");
     expect(text).toContain("task_complete");
+    expect(text).toContain("Alice asked, so she is Own");
+    expect(text).toContain("Carol is Track");
     expect(text).toContain("im_history");
     expect(text).toContain("im_file");
     expect(text).toContain("person_lookup");
     expect(text).toContain("group_lookup");
     expect(text).toContain("ask the user which one");
+    expect(text).toContain("returned by person_lookup in this turn");
+    expect(text).toContain("@all is not supported");
     expect(text.toLowerCase()).not.toContain("bash");
     expect(text).not.toContain("larkling ");
     expect(text).not.toContain("Your name is");
@@ -87,6 +97,7 @@ describe("built-in prompts", () => {
       expect(text).toContain(example);
     }
     expect(heartbeatInstructions()).toContain("WAKE");
+    expect(heartbeatInstructions()).toContain("Do not assign Own, Drive, or Track");
   });
 });
 
@@ -143,3 +154,4 @@ describe("commandsBlock", () => {
     expect(without).toContain("task cancel");
   });
 });
+

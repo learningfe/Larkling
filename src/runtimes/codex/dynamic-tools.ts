@@ -12,6 +12,7 @@ import {
   taskGetRequest,
   taskStartRequest,
   taskUpdateRequest,
+  type AudienceInput,
 } from "../../tasks/agent-tools.js";
 
 export type DynamicToolSpec = {
@@ -25,6 +26,27 @@ const str = (description: string) => ({ type: "string", description });
 const num = (description: string) => ({ type: "number", description });
 const bool = (description: string) => ({ type: "boolean", description });
 
+const personRefSchema = {
+  type: "object",
+  properties: {
+    openId: str("Feishu open_id (ou_...)"),
+    name: str("Display name"),
+  },
+  required: ["openId", "name"],
+  additionalProperties: false,
+};
+
+const audienceSchema = {
+  type: "object",
+  description: "Partial audience. Omitted roles stay unchanged. Own is the original asker, Drive pushes, Track is notified.",
+  properties: {
+    own: { type: "array", items: personRefSchema },
+    drive: { type: "array", items: personRefSchema },
+    track: { type: "array", items: personRefSchema },
+  },
+  additionalProperties: false,
+};
+
 export const FRONT_DYNAMIC_TOOLS: DynamicToolSpec[] = [
   {
     type: "function",
@@ -35,8 +57,37 @@ export const FRONT_DYNAMIC_TOOLS: DynamicToolSpec[] = [
       properties: {
         body: str("Task body: goal / current progress / next step / recent notes"),
         followUp: bool("Enable follow-up checks (default true)"),
+        audience: audienceSchema,
       },
       required: ["body"],
+      additionalProperties: false,
+    },
+  },
+  {
+    type: "function",
+    name: "task_update",
+    description: "Partial task update. Send audience to change Own / Drive / Track. Omit body and followUp to keep them.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        taskId: str("Task id"),
+        version: num("Current task version"),
+        body: str("Updated task body. Omit to keep the current body."),
+        followUp: bool("Whether follow-up checks stay on. Omit to leave unchanged."),
+        audience: audienceSchema,
+      },
+      required: ["taskId", "version"],
+      additionalProperties: false,
+    },
+  },
+  {
+    type: "function",
+    name: "task_get",
+    description: "Read a task record, including audience (own, drive, track), body, version, status, and follow-up.",
+    inputSchema: {
+      type: "object",
+      properties: { taskId: str("Task id") },
+      required: ["taskId"],
       additionalProperties: false,
     },
   },
@@ -57,16 +108,17 @@ export const BACK_DYNAMIC_TOOLS: DynamicToolSpec[] = [
   {
     type: "function",
     name: "task_update",
-    description: "Update the task body and follow-up flag. Pass the current version.",
+    description: "Partial task update. Only fields you send change: body, followUp, and audience (own / drive / track).",
     inputSchema: {
       type: "object",
       properties: {
         taskId: str("Task id"),
         version: num("Current task version from context"),
-        body: str("Updated task body"),
-        followUp: bool("Whether follow-up checks stay on"),
+        body: str("Updated task body. Omit to keep the current body."),
+        followUp: bool("Whether follow-up checks stay on. Omit to leave unchanged."),
+        audience: audienceSchema,
       },
-      required: ["taskId", "version", "body"],
+      required: ["taskId", "version"],
       additionalProperties: false,
     },
   },
@@ -81,6 +133,7 @@ export const BACK_DYNAMIC_TOOLS: DynamicToolSpec[] = [
         version: num("Current task version from context"),
         body: str("Final task body for this step"),
         followUp: bool("Keep follow-up on (default false)"),
+        audience: audienceSchema,
       },
       required: ["taskId", "version", "body"],
       additionalProperties: false,
@@ -89,7 +142,7 @@ export const BACK_DYNAMIC_TOOLS: DynamicToolSpec[] = [
   {
     type: "function",
     name: "task_get",
-    description: "Read the current task record (body, version, status, follow-up).",
+    description: "Read the current task record (audience, body, version, status, follow-up).",
     inputSchema: {
       type: "object",
       properties: { taskId: str("Task id") },
@@ -185,6 +238,7 @@ async function dispatch(tool: string, args: Record<string, unknown>, env: ToolEn
       return taskStartRequest(apiUrl, token, {
         body: String(args.body ?? ""),
         followUpEnabled: args.followUp === undefined ? undefined : Boolean(args.followUp),
+        ...(args.audience !== undefined ? { audience: audienceInput(args.audience) } : {}),
       });
     case "task_cancel":
       return taskCancelRequest(apiUrl, token, String(args.taskId ?? ""));
@@ -192,8 +246,9 @@ async function dispatch(tool: string, args: Record<string, unknown>, env: ToolEn
       return taskUpdateRequest(apiUrl, token, {
         taskId: String(args.taskId ?? ""),
         version: Number(args.version),
-        body: String(args.body ?? ""),
-        followUpEnabled: args.followUp === undefined ? true : Boolean(args.followUp),
+        ...(args.body !== undefined ? { body: String(args.body) } : {}),
+        ...(args.followUp !== undefined ? { followUpEnabled: Boolean(args.followUp) } : {}),
+        ...(args.audience !== undefined ? { audience: audienceInput(args.audience) } : {}),
       });
     case "task_complete":
       return taskCompleteRequest(apiUrl, token, {
@@ -201,6 +256,7 @@ async function dispatch(tool: string, args: Record<string, unknown>, env: ToolEn
         version: Number(args.version),
         body: String(args.body ?? ""),
         followUpEnabled: args.followUp === undefined ? undefined : Boolean(args.followUp),
+        ...(args.audience !== undefined ? { audience: audienceInput(args.audience) } : {}),
       });
     case "task_get":
       return taskGetRequest(apiUrl, token, String(args.taskId ?? ""));
@@ -231,4 +287,8 @@ async function dispatch(tool: string, args: Record<string, unknown>, env: ToolEn
     default:
       return { status: 404, text: `unknown dynamic tool: ${tool}` };
   }
+}
+
+function audienceInput(value: unknown): AudienceInput {
+  return value as AudienceInput;
 }

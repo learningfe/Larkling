@@ -137,7 +137,7 @@ export type TranscriptWrite = {
   };
 }[TranscriptEntry["type"]];
 
-export type FinalReply = { kind: "text"; text: string } | { kind: "silent" };
+export type FinalReply = { kind: "text"; text: string; notifyTaskId?: string } | { kind: "silent" };
 
 export type RuntimeRef = string;
 
@@ -286,12 +286,35 @@ export interface Profile {
   ref?: string;
 }
 
+/** A Feishu person the model has placed in a task audience. `openId` is `ou_…`. */
+export interface PersonRef {
+  openId: string;
+  name: string;
+}
+
+/**
+ * Who a matter's group/topic replies @, in order.
+ * Own is the original asker, Drive pushes the matter, Track is notified.
+ * Not cancel rights, approval, memory ownership, or trust.
+ */
+export interface TaskAudience {
+  own: PersonRef[];
+  drive: PersonRef[];
+  track: PersonRef[];
+}
+
 export interface TaskRecord {
   taskId: string;
   parentSessionId: string;
   source: { messageId: string; personId: string; turnId: string };
   /** Goal / current progress / next step / recent notes. Maintained by the front agent. */
   body: string;
+  /**
+   * Present once a task is created or its audience is written.
+   * Records from before audience existed omit it; readers treat that as empty.
+   * The harness does not fill this from the asker, history, or a ticket owner.
+   */
+  audience?: TaskAudience;
   followUpEnabled: boolean;
   version: number;
   status: "queued" | "running" | "ended" | "cancelling" | "cancelled";

@@ -136,7 +136,9 @@ export function commandsBlock(options: { cli: string[]; apiUrl: string; token: s
   const frontTaskLines = options.frontTaskTools
     ? []
     : [
-        `Start background work: ${run("task start", "--body '<goal / current progress / next step / recent notes>' [--follow-up]")}`,
+        `Start background work: ${run("task start", "--body '<goal / current progress / next step / recent notes>' [--follow-up] [--audience '<json>']")}`,
+        `Revise a task (partial; omit a field to keep it): ${run("task update", "--task <taskId> --version <version> [--body '<body>'] [--audience '<json>'] [--follow-up | --no-follow-up]")}`,
+        `Get a task: ${run("task get", "--task <taskId>")}`,
         `Cancel a task: ${run("task cancel", "--task <taskId>")}`,
       ];
   const lines =
@@ -148,7 +150,7 @@ export function commandsBlock(options: { cli: string[]; apiUrl: string; token: s
           `Read history: ${run("im history", `--container ${container} [--start <messageId>] [--end <messageId>] [--limit <n>]`)}`,
         ]
       : [
-          `Update the task body: ${run("task update", "--task <taskId> --version <version> --body '<body>' [--follow-up]")}`,
+          `Update the task (partial; omit a field to keep it): ${run("task update", "--task <taskId> --version <version> [--body '<body>'] [--audience '<json>'] [--follow-up | --no-follow-up]")}`,
           `Get the task: ${run("task get", "--task <taskId>")}`,
           `Read history: ${run("im history", `--container ${container} [--start <messageId>] [--end <messageId>] [--limit <n>]`)}`,
           `Fetch a file: ${run("im file", "--message <messageId> --key <fileKey>")}`,
