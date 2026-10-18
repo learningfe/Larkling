@@ -25,7 +25,7 @@ import type {
   TurnInput,
 } from "../protocol/types.js";
 import { conversationSessionId, scopeKey, taskSessionId } from "../protocol/types.js";
-import { applyAudience, AudienceError, emptyAudience, readAudiencePatch, renderNotifyingReply, storedAudience } from "../protocol/audience.js";
+import { applyAudience, AudienceError, emptyAudience, neutralizeUntrustedMentions, readAudiencePatch, renderNotifyingReply, storedAudience } from "../protocol/audience.js";
 import { parseCheckReply, parseConversationReply, parseJudgeReply } from "../protocol/reply.js";
 import { buildSeed, transcriptTokens } from "../protocol/seed.js";
 import { renderEnvelope } from "../channels/envelope.js";
@@ -1418,15 +1418,19 @@ export class Host {
    * The @ list is that task's audience. Nothing is added from the turn.
    */
   private notifyingText(session: SessionRecord, reply: { text: string; notifyTaskId?: string }): string {
-    const taskId = reply.notifyTaskId;
     const scope = session.scope;
-    if (!taskId || !scope) return reply.text;
-    const task = this.stateStore.get().tasks[taskId];
-    if (!task || task.parentSessionId !== session.sessionId) return reply.text;
+    if (!scope) return neutralizeUntrustedMentions(reply.text);
+    const taskId = reply.notifyTaskId;
+    let audience: TaskRecord["audience"];
+    if (taskId) {
+      const task = this.stateStore.get().tasks[taskId];
+      if (task?.parentSessionId === session.sessionId) audience = task.audience;
+      else this.log.warn("notify.skipped", { taskId, sessionId: session.sessionId, reason: task ? "wrong-session" : "missing" });
+    }
     return renderNotifyingReply({
       text: reply.text,
       scopeKind: scope.kind,
-      audience: task.audience,
+      audience,
       skipOpenIds: [this.bot.ref],
     });
   }

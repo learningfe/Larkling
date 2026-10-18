@@ -536,9 +536,10 @@ describe("feishu adapter", () => {
     expect(record.actor).toMatchObject({ ref: "ou_bot", stableId: "feishu:ou_bot", isBot: true });
   });
 
-  it("passes well-formed <at> tags through and downgrades malformed ones", () => {
+  it("keeps well-formed ou_ tags and downgrades @all and malformed ids", () => {
     expect(sanitizeAtTags('<at user_id="ou_abc123">张三</at> 好了')).toBe('<at user_id="ou_abc123">张三</at> 好了');
-    expect(sanitizeAtTags('<at user_id="all"></at> 注意')).toBe('<at user_id="all"></at> 注意');
+    expect(sanitizeAtTags('<at user_id="ou_abc123">张三</at> <at user_id="all"></at>')).toBe('<at user_id="ou_abc123">张三</at> @all');
+    expect(sanitizeAtTags('<at user_id="all"></at> 注意')).toBe("@all 注意");
     expect(sanitizeAtTags('<at user_id="bad id">李四</at>')).toBe("@李四");
   });
 

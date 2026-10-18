@@ -585,13 +585,18 @@ function textOrUndefined(value: unknown): string | undefined {
 }
 
 /**
- * The model @s people with Feishu's own `<at user_id="ou_x">Name</at>`, which
- * text and post `md` render natively. Tags whose id is not well-formed are
- * downgraded to plain `@Name`; nobody is added.
+ * Outbound text and post `md` render `<at>` as a real mention.
+ * The host has already turned model-written tags into plain text and, when the
+ * reply opted in, prepended one tag per audience member. This pass keeps only a
+ * well-formed `ou_…` tag. `@all` and any other id become plain text, so a tag
+ * that reached this layer cannot mention the whole chat or an arbitrary id.
  */
 export function sanitizeAtTags(text: string): string {
-  return text.replace(/<at\s+user_id="([^"]*)"\s*>([^<]*)<\/at>/g, (whole, id: string, name: string) => {
-    if (id === "all" || /^ou_[A-Za-z0-9]+$/.test(id)) return `<at user_id="${id}">${id === "all" ? "" : name}</at>`;
+  return text.replace(/<\s*at\b[^<>]*>([\s\S]*?)<\s*\/\s*at\s*>/gi, (whole, inner: string) => {
+    const id = /\buser_id\s*=\s*["']([^"']*)["']/i.exec(whole)?.[1] ?? "";
+    const name = String(inner).replace(/<[^>]*>/g, "").trim();
+    if (/^ou_[A-Za-z0-9]+$/.test(id)) return `<at user_id="${id}">${name}</at>`;
+    if (id === "all") return "@all";
     return name ? `@${name}` : "";
   });
 }

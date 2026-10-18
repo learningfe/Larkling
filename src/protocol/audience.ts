@@ -78,20 +78,50 @@ function readPerson(value: unknown, where: string): PersonRef {
   if (typeof openId !== "string" || !OPEN_ID.test(openId)) {
     throw new AudienceError(`${where}.openId must be a Feishu open_id (ou_…)`);
   }
-  if (typeof name !== "string" || !name.trim()) throw new AudienceError(`${where}.name is required`);
-  const cleaned = name.trim().replace(/[<>]/g, "");
+  if (typeof name !== "string") throw new AudienceError(`${where}.name is required`);
+  const cleaned = cleanName(name);
   if (!cleaned) throw new AudienceError(`${where}.name is required`);
   return { openId, name: cleaned };
+}
+
+/** Drop characters that would close a Feishu `<at>` tag or start another line. */
+function cleanName(name: string): string {
+  return name.replace(/[<>]/g, "").replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Feishu treats `<at user_id="ou_…">` and `<at user_id="all">` in outbound text as real
+ * mentions. Model text is untrusted, so those tags become plain `@name` before the
+ * harness inserts its own. Call this on the model text only, never on the prefix.
+ */
+export function neutralizeUntrustedMentions(text: string): string {
+  const paired = /<\s*at\b([^<>]*)>([\s\S]*?)<\s*\/\s*at\s*>/gi;
+  return text
+    .replace(paired, (_whole, attrs: string, inner: string) => plainMention(attrs, inner))
+    .replace(/<\s*at\b[^<>]*>/gi, "")
+    .replace(/<\s*\/\s*at\s*>/gi, "");
+}
+
+function plainMention(attrs: string, inner: string): string {
+  const id = /\buser_id\s*=\s*["']?([^\s"'<>]+)/i.exec(attrs)?.[1] ?? "";
+  if (id === "all") return "@all";
+  const name = inner.replace(/<[^>]*>/g, "").trim();
+  return name ? `@${name}` : "";
 }
 
 /** Feishu mention tags in Own, Drive, Track order. Skips ids in `skipOpenIds` and repeats. */
 export function renderAudienceMentions(audience: TaskAudience | undefined, skipOpenIds: Iterable<string> = []): string {
   const skip = new Set(skipOpenIds);
   const people = storedAudience(audience);
+  const seen = new Set<string>();
   const tags: string[] = [];
   for (const person of [...people.own, ...people.drive, ...people.track]) {
-    if (skip.has(person.openId)) continue;
-    tags.push(`<at user_id="${person.openId}">${person.name}</at>`);
+    if (!person || typeof person.openId !== "string" || !OPEN_ID.test(person.openId)) continue;
+    if (skip.has(person.openId) || seen.has(person.openId)) continue;
+    const name = cleanName(person.name ?? "");
+    if (!name) continue;
+    seen.add(person.openId);
+    tags.push(`<at user_id="${person.openId}">${name}</at>`);
   }
   return tags.join(" ");
 }
@@ -106,8 +136,9 @@ export function renderNotifyingReply(options: {
   audience?: TaskAudience;
   skipOpenIds?: Iterable<string>;
 }): string {
-  if (options.scopeKind === "dm") return options.text;
+  const text = neutralizeUntrustedMentions(options.text);
+  if (options.scopeKind === "dm") return text;
   const prefix = renderAudienceMentions(options.audience, options.skipOpenIds);
-  if (!prefix) return options.text;
-  return options.text ? `${prefix}\n${options.text}` : prefix;
+  if (!prefix) return text;
+  return text ? `${prefix}\n${text}` : prefix;
 }
