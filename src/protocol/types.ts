@@ -285,6 +285,11 @@ export interface ChannelAdapter {
   chatInfo?(chatId: string): Promise<{ name?: string } | undefined>;
   /** Every member of a group for the directory cache. Optional per channel. */
   chatMembers?(chatId: string): Promise<{ openId: string; name: string }[]>;
+  /**
+   * Local display name for an open_id, including bots.
+   * The host attaches the person directory; the channel does not import it.
+   */
+  setPersonNameLookup?(lookup: (openId: string) => string | undefined): void;
 }
 
 export interface Profile {
