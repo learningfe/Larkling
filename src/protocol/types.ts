@@ -9,7 +9,7 @@
  * - Person.refs: platform address ids, so owner DMs can be sent from a stableId.
  */
 
-export type Trust = "owner" | "trusted" | "allowed" | "denied";
+export type Trust = "owner" | "allowed" | "denied";
 
 export interface Scope {
   channel: string;
