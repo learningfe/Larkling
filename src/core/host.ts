@@ -146,6 +146,7 @@ export class Host {
     if (channel.chatInfo && channel.chatMembers) {
       this.directory.attach({ chatInfo: (id) => channel.chatInfo!(id), chatMembers: (id) => channel.chatMembers!(id) });
     }
+    channel.setPersonNameLookup?.((openId) => this.directory.person(openId)?.name);
     this.transcripts = new TranscriptStore(this.config.stateDir);
     this.imlog = new ImLog(this.config.stateDir);
     this.readParticipated = () => this.stateStore.get().participatedTopics;
