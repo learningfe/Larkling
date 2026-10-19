@@ -1,6 +1,6 @@
 import type { LarklingConfig } from "../config.js";
 import type { Clock } from "./clock.js";
-import type { MessageEvent, Scope, Trust } from "../protocol/types.js";
+import type { MessageEvent, Scope } from "../protocol/types.js";
 
 export interface PendingBatch {
   key: string;
@@ -14,6 +14,8 @@ export interface PendingBatch {
  * or debounced and judged when the scope is relevant. A topic the bot has
  * already replied in is relevant unless config names that scope explicitly.
  * Debounce is trailing: the deadline moves to now + debounce on every arrival.
+ * Bot senders use the same rules as humans. `session.botChainLimit` is applied
+ * before this gate.
  */
 export class Gate {
   private pending = new Map<string, PendingBatch>();
@@ -36,11 +38,10 @@ export class Gate {
    * Messages returned here are delivered now. `null` means the event was
    * buffered or dropped. Store-only and unsupported messages never reach the gate.
    */
-  accept(event: MessageEvent, trust: Trust): MessageEvent[] | "buffered" | "dropped" {
+  accept(event: MessageEvent): MessageEvent[] | "buffered" | "dropped" {
     if (event.scope.kind === "dm" || event.mentionsSelf) return [event];
     if (!this.readGroupMessages) return "dropped";
     if (this.modeFor(event.scope) !== "relevant") return "dropped";
-    if (event.actor.isBot && trust !== "owner" && trust !== "trusted") return "dropped";
     if (event.mentionsOthers && !event.mentionsSelf) return "dropped";
     const key = `${event.scope.channel}:${event.scope.kind}:${event.scope.id}`;
     const existing = this.pending.get(key);

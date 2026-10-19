@@ -248,6 +248,51 @@ describe("in-memory channel and scripted runtime", () => {
     expect(h.runtime.starts.length).toBe(before + 1);
   });
 
+  it("judges an unlisted bot in a relevant group and keeps a restricted group to its list", async () => {
+    const h = await startHarness((config) => {
+      config.im.respondTo.default = "relevant";
+      config.im.gate.debounceMs = 1_000;
+      config.trust.restricted = { oc_locked: ["ou_listed"] };
+      config.session.botChainLimit = 2;
+    });
+    h.runtime.handler = async (turn) => {
+      if (turn.spec.kind === "judge") {
+        turn.emit({ type: "turn.completed", text: "SKIP" });
+        return;
+      }
+      turn.emit({ type: "turn.completed", text: "front" });
+    };
+    const scope = groupScope("oc_desk");
+    const bot = { channel: "memory", ref: "ou_bot2", stableId: "feishu:ou_bot2", name: "Other", isBot: true };
+    h.channel.push(message({ text: "from bot", messageId: "b1", scope, actor: bot, mentionsSelf: false }));
+    await waitFor(() => h.host.snapshot().seenMessageIds.includes("b1"), "buffered bot");
+    await h.host.settle();
+    expect(h.runtime.opens.filter((item) => item.kind === "judge")).toHaveLength(0);
+    h.clock.advance(1_000);
+    await h.host.flushGate();
+    await h.host.settle();
+    expect(h.runtime.opens.filter((item) => item.kind === "judge")).toHaveLength(1);
+
+    const beforeChain = h.runtime.starts.length;
+    await pushAndSettle(h, message({ text: "chain", messageId: "b2", scope, actor: bot, mentionsSelf: true }));
+    expect(h.runtime.starts.length).toBe(beforeChain);
+
+    const locked = groupScope("oc_locked");
+    const stranger = { channel: "memory", ref: "ou_s", stableId: "feishu:on_stranger", name: "Sam", isBot: false };
+    const listed = { channel: "memory", ref: "ou_listed", stableId: "feishu:ou_listed", name: "Listed", isBot: false };
+    const topic = { channel: "memory" as const, kind: "topic" as const, id: "omt_locked", parentId: "oc_locked" };
+    await pushAndSettle(h, message({ text: "locked", messageId: "t1", scope: locked, actor: stranger, mentionsSelf: true }));
+    await pushAndSettle(h, message({ text: "bot locked", messageId: "t2", scope: topic, actor: bot, mentionsSelf: true }));
+    expect(h.runtime.starts.length).toBe(beforeChain);
+    await pushAndSettle(h, message({ text: "member", messageId: "t3", scope: locked, actor: listed, mentionsSelf: true }));
+    await pushAndSettle(h, message({ text: "owner", messageId: "t4", scope: topic, mentionsSelf: true }));
+    expect(h.runtime.starts.length).toBe(beforeChain + 2);
+
+    const dm = { channel: "memory" as const, kind: "dm" as const, id: "ou_s" };
+    await pushAndSettle(h, message({ text: "hi", messageId: "dm1", scope: dm, actor: stranger, mentionsSelf: false }));
+    expect(h.runtime.starts.length).toBe(beforeChain + 3);
+  });
+
   it("asks the owner on a card and continues after one approval", async () => {
     const h = await startHarness();
     h.runtime.handler = async (turn) => {

@@ -432,7 +432,7 @@ export class Host {
       }
       return;
     }
-    const gated = this.gate.accept(event, trust);
+    const gated = this.gate.accept(event);
     if (gated === "dropped" || gated === "buffered") return;
     await this.deliverMessages(event.scope, gated);
   }

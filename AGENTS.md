@@ -20,4 +20,4 @@ Audience 存在任务记录上：`{ own, drive, track }`，每项是 `{ openId, 
 
 当前不支持 @all。
 
-入站飞书消息的 `mentions` 若带 nickname 或 name，以及 openId 或 id，按原文 upsert 进人员目录。`mentioned_type: bot` 记 `isBot: true`。缺省 `isBot` 为 false。自己可以不记；其他机器人必须记，`person_lookup` 仍能查到。信任和开放群的真人默认不把 `isBot` 当成普通人。
+入站飞书消息的 `mentions` 若带 nickname 或 name，以及 openId 或 id，按原文 upsert 进人员目录。`mentioned_type: bot` 记 `isBot: true`。缺省 `isBot` 为 false。自己可以不记；其他机器人必须记，`person_lookup` 仍能查到。私聊和开放群不因 `isBot` 拒绝。`trust.restricted` 是按群的允许名单，话题跟随父群。机器人互聊只受 `session.botChainLimit` 限制。
