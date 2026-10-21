@@ -51,9 +51,8 @@ describe("delivery table", () => {
 
 describe("trust", () => {
   const human = { channel: "memory", ref: "ou_x", stableId: "feishu:on_stranger", name: "X", isBot: false };
-  const bot = { channel: "memory", ref: "ou_b", stableId: "feishu:on_bot", name: "B", isBot: true };
-  const allowed = { ...human, ref: "ou_a", stableId: "feishu:on_allowed", name: "A" };
-  const trusted = { ...human, ref: "ou_t", stableId: "feishu:on_trusted", name: "T" };
+  const bot = { channel: "memory", ref: "ou_b", stableId: "feishu:ou_b", name: "B", isBot: true };
+  const listed = { ...human, ref: "ou_a", stableId: "feishu:ou_a", name: "A" };
   const owner = { ...human, ref: "ou_owner", stableId: OWNER_ID, name: "Owner" };
   const openGroup = { channel: "memory" as const, kind: "group" as const, id: "oc_family" };
   const lockedGroup = { channel: "memory" as const, kind: "group" as const, id: "oc_locked" };
@@ -61,59 +60,54 @@ describe("trust", () => {
   const openTopic = { channel: "memory" as const, kind: "topic" as const, id: "omt_open", parentId: "oc_family" };
   const lockedTopic = { channel: "memory" as const, kind: "topic" as const, id: "omt_locked", parentId: "oc_locked" };
 
-  it("allows unlisted humans and bots in an ordinary group and its topics", async () => {
+  it("allows humans and bots in an ordinary group and its topics", async () => {
     const config = await testConfig(await tempDir());
     expect(resolveTrust(human, openGroup, config)).toBe("allowed");
     expect(resolveTrust(bot, openGroup, config)).toBe("allowed");
     expect(resolveTrust(human, openTopic, config)).toBe("allowed");
     expect(resolveTrust(bot, openTopic, config)).toBe("allowed");
-    expect(resolveTrust(trusted, openGroup, config)).toBe("trusted");
     expect(resolveTrust(owner, openGroup, config)).toBe("owner");
   });
 
-  it("keeps a restricted group and its topics on the personal allowlist", async () => {
+  it("lets a restricted group and its topics admit only the owner and listed members", async () => {
     const config = await testConfig(await tempDir(), (draft) => {
-      draft.trust.restricted = ["oc_locked"];
+      draft.trust.restricted = { oc_locked: ["feishu:ou_a", "ou_b"] };
     });
     expect(resolveTrust(human, lockedGroup, config)).toBe("denied");
-    expect(resolveTrust(bot, lockedGroup, config)).toBe("denied");
-    expect(resolveTrust(allowed, lockedGroup, config)).toBe("allowed");
-    expect(resolveTrust(trusted, lockedGroup, config)).toBe("trusted");
+    expect(resolveTrust(bot, lockedGroup, config)).toBe("allowed");
+    expect(resolveTrust(listed, lockedGroup, config)).toBe("allowed");
     expect(resolveTrust(owner, lockedGroup, config)).toBe("owner");
     expect(resolveTrust(human, lockedTopic, config)).toBe("denied");
-    expect(resolveTrust(bot, lockedTopic, config)).toBe("denied");
-    expect(resolveTrust(allowed, lockedTopic, config)).toBe("allowed");
-    expect(resolveTrust(trusted, lockedTopic, config)).toBe("trusted");
+    expect(resolveTrust(bot, lockedTopic, config)).toBe("allowed");
+    expect(resolveTrust(listed, lockedTopic, config)).toBe("allowed");
     expect(resolveTrust(owner, lockedTopic, config)).toBe("owner");
+    expect(resolveTrust({ ...bot, ref: "ou_other", stableId: "feishu:ou_other" }, lockedTopic, config)).toBe("denied");
     expect(resolveTrust(human, openGroup, config)).toBe("allowed");
     expect(resolveTrust(bot, openTopic, config)).toBe("allowed");
   });
 
-  it("authorizes DMs only for the owner and the personal allowlist", async () => {
+  it("allows any DM sender and still reserves a missing scope for the owner", async () => {
     const config = await testConfig(await tempDir(), (draft) => {
-      draft.trust.restricted = ["oc_locked"];
+      draft.trust.restricted = { oc_locked: ["feishu:ou_a"] };
     });
-    expect(resolveTrust(human, dm, config)).toBe("denied");
-    expect(resolveTrust(bot, dm, config)).toBe("denied");
-    expect(resolveTrust(allowed, dm, config)).toBe("allowed");
-    expect(resolveTrust(trusted, dm, config)).toBe("trusted");
+    expect(resolveTrust(human, dm, config)).toBe("allowed");
+    expect(resolveTrust(bot, dm, config)).toBe("allowed");
     expect(resolveTrust(owner, dm, config)).toBe("owner");
     expect(resolveTrust(owner, undefined, config)).toBe("owner");
     expect(resolveTrust(human, undefined, config)).toBe("denied");
     const orphan = { channel: "memory" as const, kind: "topic" as const, id: "omt_orphan" };
-    expect(resolveTrust(human, orphan, config)).toBe("denied");
-    expect(resolveTrust(bot, orphan, config)).toBe("denied");
-    expect(resolveTrust(allowed, orphan, config)).toBe("allowed");
+    expect(resolveTrust(human, orphan, config)).toBe("allowed");
+    expect(resolveTrust(bot, orphan, config)).toBe("allowed");
   });
 
-  it("locks a topic whose own id is restricted even when the parent group is open", async () => {
+  it("uses a topic's own allowlist when that topic id is listed", async () => {
     const config = await testConfig(await tempDir(), (draft) => {
-      draft.trust.restricted = ["omt_named"];
+      draft.trust.restricted = { omt_named: ["ou_a"] };
     });
     const topic = { channel: "memory" as const, kind: "topic" as const, id: "omt_named", parentId: "oc_family" };
     expect(resolveTrust(human, topic, config)).toBe("denied");
     expect(resolveTrust(bot, topic, config)).toBe("denied");
-    expect(resolveTrust(allowed, topic, config)).toBe("allowed");
+    expect(resolveTrust(listed, topic, config)).toBe("allowed");
     expect(resolveTrust(human, openGroup, config)).toBe("allowed");
   });
 });
@@ -129,16 +123,16 @@ describe("gate", () => {
     const gate = new Gate(config, true, clock, () => [], logs);
     const scope = groupScope();
     const first = message({ text: "a", scope, messageId: "1", mentionsSelf: false, occurredAt: "t" });
-    expect(gate.accept(first, "allowed")).toBe("buffered");
+    expect(gate.accept(first)).toBe("buffered");
     clock.advance(4_000);
     const second = message({ text: "b", scope, messageId: "2", mentionsSelf: false, occurredAt: "t" });
-    expect(gate.accept(second, "allowed")).toBe("buffered");
+    expect(gate.accept(second)).toBe("buffered");
     expect(gate.due(clock.now())).toHaveLength(0);
     clock.advance(5_000);
     expect(gate.due(clock.now())[0].messages.map((item) => item.messageId)).toEqual(["1", "2"]);
     expect(gateDecisions(logs)).toEqual([]);
     const other = message({ text: "c", scope, messageId: "3", mentionsSelf: false, mentionsOthers: true });
-    expect(gate.accept(other, "allowed")).toBe("dropped");
+    expect(gate.accept(other)).toBe("dropped");
     expect(gateDecisions(logs).at(-1)).toMatchObject({
       sessionId: "memory:group:oc_group",
       chatId: "oc_group",
@@ -151,7 +145,7 @@ describe("gate", () => {
       source: "short_circuit",
     });
     const mention = message({ text: "d", scope, messageId: "4", mentionsSelf: true });
-    expect(gate.accept(mention, "allowed")).toEqual([mention]);
+    expect(gate.accept(mention)).toEqual([mention]);
     expect(gateDecisions(logs).at(-1)).toMatchObject({
       messageIds: ["4"],
       decision: "allow",
@@ -173,12 +167,12 @@ describe("gate", () => {
     expect(gate.modeFor(joined)).toBe("relevant");
     expect(gate.modeFor(other)).toBe("mention");
     const quiet = message({ text: "later", scope: joined, messageId: "q1", mentionsSelf: false });
-    expect(gate.accept(quiet, "allowed")).toBe("buffered");
+    expect(gate.accept(quiet)).toBe("buffered");
     expect(gateDecisions(logs)).toEqual([]);
     config.im.respondTo.scopes.omt_joined = "mention";
     expect(gate.modeFor(joined)).toBe("mention");
     const skipped = message({ text: "nope", scope: joined, messageId: "q2", mentionsSelf: false });
-    expect(gate.accept(skipped, "allowed")).toBe("dropped");
+    expect(gate.accept(skipped)).toBe("dropped");
     expect(gateDecisions(logs).at(-1)).toMatchObject({
       sessionId: "memory:topic:omt_joined",
       chatId: "omt_joined",
@@ -201,22 +195,23 @@ describe("gate", () => {
     const gate = new Gate(config, true, clock, () => [], logs);
     const scope = groupScope();
     const dm = message({ text: "ping", messageId: "dm", mentionsSelf: true });
-    expect(gate.accept(dm, "owner")).toEqual([dm]);
+    expect(gate.accept(dm)).toEqual([dm]);
     expect(gateDecisions(logs).at(-1)).toMatchObject({ decision: "allow", reason: "dm", mode: "relevant", mentionsSelf: true });
     const bot = { channel: "memory", ref: "ou_b", stableId: "feishu:on_bot", name: "Other", isBot: true };
     const fromBot = message({ text: "bot", scope, messageId: "bot", mentionsSelf: false, actor: bot });
-    expect(gate.accept(fromBot, "allowed")).toBe("dropped");
-    expect(gateDecisions(logs).at(-1)).toMatchObject({ decision: "skip", reason: "bot_sender", senderId: "feishu:on_bot", mentionsSelf: false });
-    const buffered = gateDecisions(logs).length;
-    expect(gate.accept(message({ text: "trusted bot", scope, messageId: "tb", mentionsSelf: false, actor: bot }), "trusted")).toBe("buffered");
-    expect(gate.accept(message({ text: "owner bot", scope, messageId: "ob", mentionsSelf: false, actor: bot }), "owner")).toBe("buffered");
-    expect(gateDecisions(logs)).toHaveLength(buffered);
+    const beforeBot = gateDecisions(logs).length;
+    expect(gate.accept(fromBot)).toBe("buffered");
+    expect(gateDecisions(logs)).toHaveLength(beforeBot);
+    expect(gateDecisions(logs).some((item) => item.reason === "bot_sender")).toBe(false);
+    const mentioning = message({ text: "@sam", scope, messageId: "mb", mentionsSelf: false, mentionsOthers: true, actor: bot });
+    expect(gate.accept(mentioning)).toBe("dropped");
+    expect(gateDecisions(logs).at(-1)).toMatchObject({ decision: "skip", reason: "mentions_others", senderId: "feishu:on_bot" });
     const blind = new Gate(config, false, clock, () => [], logs);
     const quiet = message({ text: "quiet", scope, messageId: "quiet", mentionsSelf: false });
-    expect(blind.accept(quiet, "allowed")).toBe("dropped");
+    expect(blind.accept(quiet)).toBe("dropped");
     expect(gateDecisions(logs).at(-1)).toMatchObject({ messageIds: ["quiet"], decision: "skip", reason: "group_read_disabled" });
     const mentioned = message({ text: "@bot", scope, messageId: "at", mentionsSelf: true });
-    expect(blind.accept(mentioned, "allowed")).toEqual([mentioned]);
+    expect(blind.accept(mentioned)).toEqual([mentioned]);
     expect(gateDecisions(logs).at(-1)).toMatchObject({ messageIds: ["at"], decision: "allow", reason: "mention" });
   });
 });

@@ -36,7 +36,7 @@ export async function testConfig(stateDir: string, patch?: (config: LarklingConf
         front: { runtime: "codex", instructions: "front instructions" },
         back: { runtime: "codex", instructions: "back instructions" },
       },
-      trust: { trusted: ["feishu:on_trusted"], allowed: ["feishu:on_allowed"] },
+      trust: {},
     },
     {},
     "/home/tester",

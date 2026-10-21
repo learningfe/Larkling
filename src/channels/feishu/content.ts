@@ -29,7 +29,10 @@ export interface FeishuRawMessage {
 export interface FeishuMention {
   key?: string;
   name?: string;
-  id?: string | { open_id?: string; user_id?: string };
+  nickname?: string;
+  open_id?: string;
+  openId?: string;
+  id?: string | { open_id?: string; openId?: string; user_id?: string };
   id_type?: string;
   mentioned_type?: string;
 }
@@ -66,9 +69,9 @@ export interface NormalizeResult {
   mentionsSelf: boolean;
   mentionsOthers: boolean;
   disposition: "normal" | "store_only" | "unsupported";
-  names: { stableId: string; ref: string; name: string }[];
+  names: { stableId: string; ref: string; name: string; isBot?: boolean }[];
   /** Real @ mentions, in order, deduped. ref "all" is @all. */
-  mentions: { ref: string; name: string }[];
+  mentions: { ref: string; name: string; isBot?: boolean }[];
 }
 
 const STORE_ONLY = new Set(["system", "hongbao", "sticker"]);
@@ -204,17 +207,38 @@ function stringField(content: Record<string, unknown>, key: string): string {
 function namesFromMentions(mentions: FeishuMention[]): NormalizeResult["names"] {
   const names: NormalizeResult["names"] = [];
   for (const mention of mentions) {
-    const openId = mentionOpenId(mention);
-    if (!openId || !mention.name) continue;
-    if (mention.key === "@_all" || openId === "all") continue;
-    names.push({ stableId: `feishu:${openId}`, ref: openId, name: mention.name });
+    const person = mentionPerson(mention);
+    if (!person) continue;
+    names.push({ stableId: `feishu:${person.openId}`, ref: person.openId, name: person.name, isBot: person.isBot });
   }
   return names;
 }
 
-function mentionOpenId(mention: FeishuMention): string | undefined {
+/** open_id from `openId`, `open_id`, or `id`. A user_id is not an open_id. */
+export function mentionOpenId(mention: FeishuMention): string | undefined {
+  const direct = textField(mention.openId) || textField(mention.open_id);
+  if (direct) return direct;
   if (typeof mention.id === "string") return mention.id_type === "open_id" || !mention.id_type ? mention.id : undefined;
-  return mention.id?.open_id;
+  return textField(mention.id?.open_id) || textField(mention.id?.openId);
+}
+
+/** Display name from the payload. Nickname wins over name. Empty when neither is present. */
+export function mentionDisplayName(mention: FeishuMention): string {
+  const nickname = textField(mention.nickname) ?? "";
+  const name = textField(mention.name) ?? "";
+  return nickname || name;
+}
+
+/** A mentioned account. Skips @all and any id that is not `ou_…`. Does not invent a name. */
+export function mentionPerson(mention: FeishuMention): { openId: string; name: string; isBot: boolean } | undefined {
+  const openId = mentionOpenId(mention);
+  const name = mentionDisplayName(mention);
+  if (!openId || openId === "all" || !/^ou_[A-Za-z0-9]+$/.test(openId) || !name) return undefined;
+  return { openId, name, isBot: mention.mentioned_type === "bot" };
+}
+
+function textField(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
 function mentionsSelfFrom(mentions: FeishuMention[], botOpenId?: string): boolean {
@@ -247,32 +271,41 @@ export function atTag(userId: string, name: string): string {
 
 function mentionLabel(mention: FeishuMention): string {
   const openId = mentionOpenId(mention);
+  const name = mentionDisplayName(mention);
   if (mention.key === "@_all" || openId === "all") return atTag("all", "");
-  return atTag(openId || "unknown", mention.name || fallbackName(openId || mention.key || "user"));
+  return atTag(openId || "unknown", name || fallbackName(openId || mention.key || "user"));
 }
 
-function collectMentions(mentions: FeishuMention[], post?: Record<string, unknown>): { ref: string; name: string }[] {
-  const out: { ref: string; name: string }[] = [];
-  const add = (ref: string, name: string) => {
-    if (!ref || out.some((item) => item.ref === ref)) return;
-    out.push({ ref, name });
+function collectMentions(mentions: FeishuMention[], post?: Record<string, unknown>): { ref: string; name: string; isBot?: boolean }[] {
+  const out: { ref: string; name: string; isBot?: boolean }[] = [];
+  const add = (ref: string, name: string, isBot = false) => {
+    if (!ref || !name || out.some((item) => item.ref === ref)) return;
+    out.push(isBot ? { ref, name, isBot: true } : { ref, name });
   };
   for (const mention of mentions) {
+    const person = mentionPerson(mention);
     const openId = mentionOpenId(mention);
-    if (mention.key === "@_all" || openId === "all") add("all", "所有人");
-    else if (openId) add(openId, mention.name || fallbackName(openId));
+    if (mention.key === "@_all" || openId === "all") add("all", mentionDisplayName(mention) || "所有人");
+    else if (person) add(person.openId, person.name, person.isBot);
   }
   if (post) {
     for (const row of pickRich(post).rows) {
       for (const node of row) {
         if (node.tag === "at") {
           const userId = String(node.user_id ?? "");
-          if (userId === "all") add("all", "所有人");
-          else if (userId) add(userId, typeof node.user_name === "string" && node.user_name ? node.user_name : fallbackName(userId));
+          const known = mentions.find((item) => mentionOpenId(item) === userId);
+          const person = known ? mentionPerson(known) : undefined;
+          const nodeName = typeof node.user_name === "string" ? node.user_name.trim() : "";
+          const name = person?.name || nodeName;
+          if (userId === "all") add("all", name || "所有人");
+          else if (name && /^ou_[A-Za-z0-9]+$/.test(userId)) add(userId, name, person?.isBot === true);
         } else if (node.tag === "md" || node.tag === "text") {
           for (const match of String(node.text ?? "").matchAll(/<at\s+user_id="([^"]+)"[^>]*>([^<]*)<\/at>/g)) {
             const known = mentions.find((item) => mentionOpenId(item) === match[1]);
-            add(match[1], match[1] === "all" ? "所有人" : known?.name || match[2] || fallbackName(match[1]));
+            const person = known ? mentionPerson(known) : undefined;
+            const name = person?.name || match[2].trim();
+            if (match[1] === "all") add("all", name || "所有人");
+            else if (name && /^ou_[A-Za-z0-9]+$/.test(match[1])) add(match[1], name, person?.isBot === true);
           }
         }
       }

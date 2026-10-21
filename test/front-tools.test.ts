@@ -26,6 +26,12 @@ describe("agent task HTTP helpers", () => {
     expect(updated.status).toBe(200);
     const completed = await taskCompleteRequest(url, "tok", { taskId: "t1", version: 2, body: "done" });
     expect(completed.status).toBe(200);
+    const audienceOnly = await taskUpdateRequest(url, "tok", {
+      taskId: "t1",
+      version: 3,
+      audience: { track: [{ openId: "ou_carol", name: "Carol" }] },
+    });
+    expect(audienceOnly.status).toBe(200);
     server.close();
     expect(seen[0]).toMatchObject({ path: "/v1/task/start", auth: "Bearer tok" });
     expect(JSON.parse(seen[0].body ?? "{}")).toEqual({ body: "goal", followUpEnabled: true });
@@ -34,5 +40,10 @@ describe("agent task HTTP helpers", () => {
     expect(JSON.parse(seen[2].body ?? "{}")).toMatchObject({ taskId: "t1", version: 1, followUpEnabled: true });
     expect(seen[3].path).toBe("/v1/task/update");
     expect(JSON.parse(seen[3].body ?? "{}")).toMatchObject({ followUpEnabled: false, body: "done" });
+    expect(JSON.parse(seen[4].body ?? "{}")).toEqual({
+      taskId: "t1",
+      version: 3,
+      audience: { track: [{ openId: "ou_carol", name: "Carol" }] },
+    });
   });
 });

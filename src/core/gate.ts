@@ -1,6 +1,6 @@
 import type { LarklingConfig } from "../config.js";
 import type { Logger } from "../log.js";
-import { conversationSessionId, type MessageEvent, type Scope, type Trust } from "../protocol/types.js";
+import { conversationSessionId, type MessageEvent, type Scope } from "../protocol/types.js";
 import type { Clock } from "./clock.js";
 
 export type GateDecision = "allow" | "skip";
@@ -78,7 +78,7 @@ export class Gate {
    * Messages returned here are delivered now. `null` means the event was
    * buffered or dropped. Store-only and unsupported messages never reach the gate.
    */
-  accept(event: MessageEvent, trust: Trust): MessageEvent[] | "buffered" | "dropped" {
+  accept(event: MessageEvent): MessageEvent[] | "buffered" | "dropped" {
     if (event.scope.kind === "dm" || event.mentionsSelf) {
       this.logShortCircuit(event, "allow", event.scope.kind === "dm" ? "dm" : "mention");
       return [event];
@@ -89,10 +89,6 @@ export class Gate {
     }
     if (this.modeFor(event.scope) !== "relevant") {
       this.logShortCircuit(event, "skip", "mention_required");
-      return "dropped";
-    }
-    if (event.actor.isBot && trust !== "owner" && trust !== "trusted") {
-      this.logShortCircuit(event, "skip", "bot_sender");
       return "dropped";
     }
     if (event.mentionsOthers && !event.mentionsSelf) {

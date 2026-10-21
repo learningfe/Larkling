@@ -25,10 +25,11 @@ import type {
   TurnInput,
 } from "../protocol/types.js";
 import { conversationSessionId, scopeKey, taskSessionId } from "../protocol/types.js";
+import { applyAudience, AudienceError, emptyAudience, readAudiencePatch, renderOutboundMentions, storedAudience } from "../protocol/audience.js";
 import { parseCheckReply, parseConversationReply, parseJudgeReply } from "../protocol/reply.js";
 import { buildSeed, transcriptTokens } from "../protocol/seed.js";
 import { backInstructions, compactInstructions, frontInstructions, heartbeatInstructions, relevanceInstructions, withFile } from "../tasks/prompts.js";
-import { listenApi } from "../tasks/api.js";
+import { listenApi, type TaskStartBody, type TaskUpdateBody } from "../tasks/api.js";
 import { heartbeatDue, slotsUsed } from "../tasks/scheduler.js";
 import { newId, sha256 } from "../util/id.js";
 import { Logger } from "../log.js";
@@ -145,6 +146,7 @@ export class Host {
     if (channel.chatInfo && channel.chatMembers) {
       this.directory.attach({ chatInfo: (id) => channel.chatInfo!(id), chatMembers: (id) => channel.chatMembers!(id) });
     }
+    channel.setPersonNameLookup?.((openId) => this.directory.person(openId)?.name);
     this.transcripts = new TranscriptStore(this.config.stateDir);
     this.imlog = new ImLog(this.config.stateDir);
     this.readParticipated = () => this.stateStore.get().participatedTopics;
@@ -439,7 +441,7 @@ export class Host {
       this.logGateShortCircuit(event, "skip", "unsupported");
       return;
     }
-    const gated = this.gate.accept(event, trust);
+    const gated = this.gate.accept(event);
     if (gated === "dropped" || gated === "buffered") return;
     await this.deliverMessages(event.scope, gated);
   }
@@ -719,14 +721,18 @@ export class Host {
       error: outcome.error,
     });
       if (session.kind === "conversation") {
-      const reply = parseConversationReply(text);
+      let reply = parseConversationReply(text);
       const recalled = turn.messageIds.length > 0 && turn.messageIds.every((id) => turn.recalledMessageIds.includes(id));
       const suppress = turn.suppressOutbound || Boolean(turn.interruptReason) || outcome.kind !== "completed" || recalled;
       let delivered = false;
       if (!suppress && reply.kind === "text" && session.scope) {
         const scope = session.scope;
-        await this.deliver({ type: "text", scope, text: reply.text, replyTo: turn.messageIds.at(-1), idempotencyKey: newId() }, [scope], sessionId);
-        delivered = true;
+        const rendered = this.outboundText(session, reply.text);
+        reply = { ...reply, text: rendered };
+        if (rendered.trim()) {
+          await this.deliver({ type: "text", scope, text: rendered, replyTo: turn.messageIds.at(-1), idempotencyKey: newId() }, [scope], sessionId);
+          delivered = true;
+        }
       } else if (outcome.kind === "failed" && !turn.interruptReason && session.scope) {
         const scope = session.scope;
         await this.deliver(
@@ -1437,7 +1443,13 @@ export class Host {
     await this.enqueue(sessionId, [{ kind: "prompt", text: prompt }]);
   }
 
-  async taskStart(token: string, body: { body: string; followUpEnabled?: boolean }): Promise<TaskRecord> {
+  /** Keep model `<at>` tags only when the scope can mention and the id is `ou_…`. */
+  private outboundText(session: SessionRecord, text: string): string {
+    const kind = session.scope?.kind ?? "dm";
+    return renderOutboundMentions(text, kind);
+  }
+
+  async taskStart(token: string, body: TaskStartBody): Promise<TaskRecord> {
     if (!this.config.tasks.enabled) throw new ApiError("FORBIDDEN", "tasks are disabled", 403);
     const auth = this.authorize(token);
     if (auth.role !== "session") throw new ApiError("FORBIDDEN", "only a front conversation can start a task", 403);
@@ -1461,6 +1473,7 @@ export class Host {
         parentSessionId: parent.sessionId,
         source,
         body: body.body,
+        audience: body.audience === undefined ? emptyAudience() : applyAudience(emptyAudience(), readAudience(body.audience)),
         followUpEnabled: body.followUpEnabled ?? false,
         version: 1,
         status: "queued",
@@ -1471,7 +1484,7 @@ export class Host {
       return task;
     });
     await this.pumpTasks();
-    return this.stateStore.get().tasks[created.taskId] ?? created;
+    return presentTask(this.stateStore.get().tasks[created.taskId] ?? created);
   }
 
   async taskContinue(token: string, body: { taskId: string; message: string }): Promise<TaskRecord> {
@@ -1481,7 +1494,7 @@ export class Host {
     if (task.status === "running") {
       if (!task.sessionId) throw new ApiError("NOT_FOUND", "task session is missing", 404);
       await this.enqueue(task.sessionId, [{ kind: "prompt", text: body.message }]);
-      return this.stateStore.get().tasks[task.taskId];
+      return presentTask(this.stateStore.get().tasks[task.taskId]);
     }
     if (task.status !== "ended" && task.status !== "queued") throw new ApiError("FORBIDDEN", `cannot continue a ${task.status} task`, 403);
     await this.stateStore.update((draft) => {
@@ -1494,21 +1507,31 @@ export class Host {
       current.updatedAt = this.iso();
     });
     await this.startTaskSession(task.taskId, body.message);
-    return this.stateStore.get().tasks[task.taskId];
+    return presentTask(this.stateStore.get().tasks[task.taskId]);
   }
 
-  async taskUpdate(token: string, body: { taskId: string; version: number; body: string; followUpEnabled: boolean }): Promise<TaskRecord> {
+  async taskUpdate(token: string, body: TaskUpdateBody): Promise<TaskRecord> {
     this.requireTask(token, body.taskId, true);
-    return this.stateStore.update((draft) => {
-      const task = draft.tasks[body.taskId];
-      if (!task) throw new ApiError("NOT_FOUND", "task not found", 404);
-      if (task.version !== body.version) throw new ApiError("VERSION_CONFLICT", "task version conflict", 409);
-      task.body = body.body;
-      task.followUpEnabled = body.followUpEnabled;
-      task.version += 1;
-      task.updatedAt = this.iso();
-      return task;
-    });
+    const hasBody = Object.hasOwn(body, "body");
+    const hasFollow = Object.hasOwn(body, "followUpEnabled");
+    const hasAudience = Object.hasOwn(body, "audience");
+    if (!hasBody && !hasFollow && !hasAudience) throw new ApiError("BAD_REQUEST", "nothing to update");
+    if (hasBody && typeof body.body !== "string") throw new ApiError("BAD_REQUEST", "body must be a string");
+    if (hasFollow && typeof body.followUpEnabled !== "boolean") throw new ApiError("BAD_REQUEST", "followUpEnabled must be a boolean");
+    const audiencePatch = hasAudience ? readAudience(body.audience) : undefined;
+    return presentTask(
+      await this.stateStore.update((draft) => {
+        const task = draft.tasks[body.taskId];
+        if (!task) throw new ApiError("NOT_FOUND", "task not found", 404);
+        if (task.version !== body.version) throw new ApiError("VERSION_CONFLICT", "task version conflict", 409);
+        if (hasBody) task.body = body.body ?? "";
+        if (hasFollow) task.followUpEnabled = body.followUpEnabled ?? false;
+        if (audiencePatch) task.audience = applyAudience(task.audience, audiencePatch);
+        task.version += 1;
+        task.updatedAt = this.iso();
+        return task;
+      }),
+    );
   }
 
   async taskGet(token: string, taskId: string): Promise<unknown> {
@@ -1516,6 +1539,7 @@ export class Host {
     return {
       taskId: task.taskId,
       body: task.body,
+      audience: storedAudience(task.audience),
       status: task.status,
       version: task.version,
       followUpEnabled: task.followUpEnabled,
@@ -1534,7 +1558,14 @@ export class Host {
       if (auth.role === "session") return task.parentSessionId === auth.sessionId;
       return task.sessionId === auth.sessionId;
     });
-    return tasks.map((task) => ({ taskId: task.taskId, status: task.status, version: task.version, followUpEnabled: task.followUpEnabled, body: task.body }));
+    return tasks.map((task) => ({
+      taskId: task.taskId,
+      status: task.status,
+      version: task.version,
+      followUpEnabled: task.followUpEnabled,
+      body: task.body,
+      audience: storedAudience(task.audience),
+    }));
   }
 
   async taskCancel(token: string, taskId: string): Promise<TaskRecord> {
@@ -1552,7 +1583,7 @@ export class Host {
       if (current.sessionId && draft.sessions[current.sessionId]) draft.sessions[current.sessionId].queue = [];
     });
     if (wasRunning && task.sessionId) await this.interrupt(task.sessionId, "cancel");
-    return this.stateStore.get().tasks[taskId];
+    return presentTask(this.stateStore.get().tasks[taskId]);
   }
 
   async imHistory(token: string, body: { container: string; start?: string; end?: string; limit?: number }): Promise<unknown> {
@@ -1625,9 +1656,12 @@ export class Host {
     const chatId = event.scope.kind === "topic" ? event.scope.parentId : event.scope.kind === "group" ? event.scope.id : undefined;
     try {
       if (chatId) void this.directory.touchGroup(chatId).catch(() => undefined);
-      if (event.actor.ref !== this.bot.ref && event.actor.name) await this.directory.observePerson(event.actor.ref, event.actor.name, chatId);
+      if (event.actor.ref !== this.bot.ref && event.actor.name) {
+        await this.directory.observePerson(event.actor.ref, event.actor.name, chatId, event.actor.isBot);
+      }
       for (const mention of event.mentions ?? []) {
-        if (mention.ref !== this.bot.ref) await this.directory.observePerson(mention.ref, mention.name, chatId);
+        if (!mention.ref || mention.ref === "all" || mention.ref === this.bot.ref) continue;
+        await this.directory.observePerson(mention.ref, mention.name, chatId, mention.isBot === true);
       }
     } catch (error) {
       this.log.warn("directory.observe_failed", { error: String(error) });
@@ -1968,6 +2002,20 @@ function inRange(value: string, start?: string, end?: string): boolean {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function presentTask(task: TaskRecord | undefined): TaskRecord {
+  if (!task) throw new ApiError("NOT_FOUND", "task not found", 404);
+  return { ...task, audience: storedAudience(task.audience) };
+}
+
+function readAudience(value: unknown) {
+  try {
+    return readAudiencePatch(value);
+  } catch (error) {
+    if (error instanceof AudienceError) throw new ApiError("BAD_REQUEST", error.message);
+    throw error;
+  }
 }
 
 export async function createHost(options: HostOptions): Promise<Host> {

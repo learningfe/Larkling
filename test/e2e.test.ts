@@ -374,7 +374,7 @@ describe("in-memory channel and scripted runtime", () => {
       config.im.respondTo.default = "relevant";
       config.im.respondTo.scopes.oc_mention = "mention";
       config.im.gate.debounceMs = 1_000;
-      config.trust.restricted = ["oc_locked"];
+      config.trust.restricted = { oc_locked: [] };
       config.session.botChainLimit = 2;
     }, logs);
     h.runtime.handler = async (turn) => {
@@ -515,9 +515,16 @@ describe("in-memory channel and scripted runtime", () => {
     await pushAndSettle(h, message({ text: "locked", messageId: "t1", scope: locked, actor: human, mentionsSelf: true }));
     expect(gateDecisions(logs).at(-1)).toMatchObject({ chatId: "oc_locked", messageIds: ["t1"], decision: "skip", reason: "trust", source: "short_circuit" });
 
-    const allowedBot = { channel: "memory", ref: "ou_bot2", stableId: "feishu:on_allowed", name: "Other", isBot: true };
+    const allowedBot = { channel: "memory", ref: "ou_bot2", stableId: "feishu:ou_bot2", name: "Other", isBot: true };
+    const decisionsBeforeBot = gateDecisions(logs).length;
     await pushAndSettle(h, message({ text: "from bot", messageId: "b1", scope, actor: allowedBot, mentionsSelf: false }));
-    expect(gateDecisions(logs).at(-1)).toMatchObject({ messageIds: ["b1"], decision: "skip", reason: "bot_sender", senderId: "feishu:on_allowed" });
+    expect(h.host.snapshot().seenMessageIds).toContain("b1");
+    expect(gateDecisions(logs)).toHaveLength(decisionsBeforeBot);
+    h.clock.advance(1_000);
+    await h.host.flushGate();
+    await h.host.settle();
+    expect(gateDecisions(logs).at(-1)).toMatchObject({ messageIds: ["b1"], decision: "skip", source: "judge" });
+    expect(gateDecisions(logs).some((item) => item.reason === "bot_sender")).toBe(false);
 
     await pushAndSettle(h, message({ text: "chain", messageId: "b2", scope, actor: allowedBot, mentionsSelf: true }));
     expect(gateDecisions(logs).at(-1)).toMatchObject({ messageIds: ["b2"], decision: "skip", reason: "bot_chain" });

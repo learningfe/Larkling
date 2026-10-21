@@ -1,7 +1,7 @@
 import type { LarklingConfig } from "../config.js";
 import type { Actor, Scope, Trust } from "../protocol/types.js";
 
-const RANK: Record<Trust, number> = { denied: 0, allowed: 1, trusted: 2, owner: 3 };
+const RANK: Record<Trust, number> = { denied: 0, allowed: 1, owner: 2 };
 
 export function trustAtLeast(trust: Trust, minimum: Trust): boolean {
   return RANK[trust] >= RANK[minimum];
@@ -10,30 +10,36 @@ export function trustAtLeast(trust: Trust, minimum: Trust): boolean {
 /**
  * Ingress role for one actor in one scope.
  *
- * Owner always passes. `trusted` and `allowed` are one personal allowlist here;
- * the returned label still records which list matched. Anyone else is allowed
- * in an ordinary group — human or bot — and denied in a DM, a topic with no
- * group parent, or a chat id listed in `trust.restricted`. A topic inherits
- * its parent group's mode. Mention policy and `session.botChainLimit` are
- * decided elsewhere.
+ * Owner always passes. There is no global person allowlist. A DM is allowed for
+ * anyone who can message the bot. An ordinary group, and a topic under it, is
+ * open to humans and bots. `trust.restricted` is a per-chat allowlist: when a
+ * chat id is listed, only the owner and the ids written for that chat may enter
+ * it. A topic uses its own list when present, otherwise its parent group's list.
+ * A missing scope is not a chat, so only the owner passes. Mention policy and
+ * `session.botChainLimit` are decided elsewhere. `isBot` does not change this.
  */
 export function resolveTrust(actor: Actor, scope: Scope | undefined, config: LarklingConfig): Trust {
   if (actor.stableId === config.owner) return "owner";
-  if (config.trust.trusted.includes(actor.stableId)) return "trusted";
-  if (config.trust.allowed.includes(actor.stableId)) return "allowed";
   if (!scope) return "denied";
-  const chatId = groupChatId(scope);
-  if (!chatId) return "denied";
-  if (config.trust.restricted.includes(chatId) || config.trust.restricted.includes(scope.id)) return "denied";
-  return "allowed";
+  if (scope.kind === "dm") return "allowed";
+  const members = restrictedMembers(scope, config.trust.restricted);
+  if (!members) return "allowed";
+  return members.some((member) => memberMatches(actor, member)) ? "allowed" : "denied";
 }
 
-/**
- * Group chat whose openness this scope inherits.
- * Feishu topics carry the parent chat id; a topic without one is not group-backed.
- */
-function groupChatId(scope: Scope): string | undefined {
-  if (scope.kind === "group") return scope.id;
-  if (scope.kind === "topic" && scope.parentId) return scope.parentId;
+/** Own chat id wins. A topic with no entry of its own inherits the parent group. */
+function restrictedMembers(scope: Scope, restricted: Record<string, string[]>): string[] | undefined {
+  if (Object.hasOwn(restricted, scope.id)) return restricted[scope.id];
+  if (scope.kind === "topic" && scope.parentId && Object.hasOwn(restricted, scope.parentId)) return restricted[scope.parentId];
   return undefined;
+}
+
+/** `feishu:ou_…` and a bare `ou_…` both match. Other stable ids match exactly. */
+function memberMatches(actor: Actor, member: string): boolean {
+  const id = member.trim();
+  if (!id) return false;
+  if (id === actor.stableId || id === actor.ref) return true;
+  if (id.startsWith("ou_")) return actor.stableId === `feishu:${id}`;
+  if (id.startsWith("feishu:")) return actor.ref === id.slice("feishu:".length);
+  return false;
 }

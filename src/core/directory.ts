@@ -8,6 +8,11 @@ export interface CachedPerson {
   /** Chat ids this person was seen in, most recent first. */
   groups: string[];
   updatedAt: string;
+  /**
+   * True when a Feishu mention said `mentioned_type: bot`.
+   * Records written before this field existed omit it; readers treat that as false.
+   */
+  isBot?: boolean;
 }
 
 export interface CachedGroup {
@@ -29,6 +34,8 @@ export interface PersonMatch {
   name: string;
   groups: string[];
   match: "exact" | "fuzzy";
+  /** Bots stay findable. Callers that want a human skip `isBot`. */
+  isBot: boolean;
 }
 
 export interface GroupMatch {
@@ -69,7 +76,9 @@ export class Directory {
     const directory = new Directory(join(stateDir, "directory.json"), now);
     try {
       const parsed = JSON.parse(await readFile(directory.path, "utf8")) as Partial<DirectoryFile>;
-      for (const person of parsed.persons ?? []) directory.persons.set(person.openId, { ...person, groups: person.groups ?? [] });
+      for (const person of parsed.persons ?? []) {
+        directory.persons.set(person.openId, { ...person, groups: person.groups ?? [], isBot: person.isBot === true });
+      }
       for (const group of parsed.groups ?? []) directory.groups.set(group.chatId, group);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
@@ -89,13 +98,14 @@ export class Directory {
     return this.groups.get(chatId);
   }
 
-  /** Passive upsert from messages, mentions, and member lists. */
-  async observePerson(openId: string, name: string, chatId?: string): Promise<void> {
+  /** Passive upsert from messages, mentions, and member lists. `isBot` only turns on, never off. */
+  async observePerson(openId: string, name: string, chatId?: string, isBot = false): Promise<void> {
     if (!openId.startsWith("ou_") || !name) return;
     const current = this.persons.get(openId);
     const groups = chatId ? [chatId, ...(current?.groups ?? []).filter((id) => id !== chatId)] : current?.groups ?? [];
-    if (current && current.name === name && current.groups[0] === groups[0] && this.fresh(current.updatedAt)) return;
-    this.persons.set(openId, { openId, name, groups, updatedAt: this.iso() });
+    const nextBot = current?.isBot === true || isBot;
+    if (current && current.name === name && current.groups[0] === groups[0] && current.isBot === nextBot && this.fresh(current.updatedAt)) return;
+    this.persons.set(openId, { openId, name, groups, updatedAt: this.iso(), isBot: nextBot });
     await this.save();
   }
 
@@ -180,7 +190,13 @@ export class Directory {
   }
 
   private personMatch(person: CachedPerson, match: "exact" | "fuzzy"): PersonMatch {
-    return { openId: person.openId, name: person.name, groups: person.groups.map((id) => this.groups.get(id)?.name || id), match };
+    return {
+      openId: person.openId,
+      name: person.name,
+      groups: person.groups.map((id) => this.groups.get(id)?.name || id),
+      match,
+      isBot: person.isBot === true,
+    };
   }
 
   private orderedGroups(first?: string): string[] {
@@ -208,7 +224,7 @@ export class Directory {
           if (!member.openId.startsWith("ou_") || !member.name) continue;
           const current = this.persons.get(member.openId);
           const groups = [chatId, ...(current?.groups ?? []).filter((id) => id !== chatId)];
-          this.persons.set(member.openId, { openId: member.openId, name: member.name, groups, updatedAt: at });
+          this.persons.set(member.openId, { openId: member.openId, name: member.name, groups, updatedAt: at, isBot: current?.isBot === true });
         }
         await this.save();
         return members;

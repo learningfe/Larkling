@@ -23,7 +23,7 @@ export class PersonDirectory {
     const directory = new PersonDirectory(path);
     try {
       const parsed = JSON.parse(await readFile(path, "utf8")) as PersonFile;
-      directory.persons = (parsed.persons ?? []).map((person) => ({ ...person, refs: person.refs ?? [] }));
+      directory.persons = (parsed.persons ?? []).map((person) => ({ ...person, refs: person.refs ?? [], isBot: person.isBot === true }));
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
@@ -31,7 +31,13 @@ export class PersonDirectory {
   }
 
   list(): Person[] {
-    return this.persons.map((person) => ({ ...person, identities: [...person.identities], names: [...person.names], refs: [...person.refs] }));
+    return this.persons.map((person) => ({
+      ...person,
+      identities: [...person.identities],
+      names: [...person.names],
+      refs: [...person.refs],
+      isBot: person.isBot === true,
+    }));
   }
 
   byStableId(stableId: string): Person | undefined {
@@ -51,14 +57,14 @@ export class PersonDirectory {
 
   async observe(actor: Actor, at: string): Promise<Person> {
     return this.commit(() => {
-      const person = this.upsert(actor.stableId, actor.name, actor.ref, at);
+      const person = this.upsert(actor.stableId, actor.name, actor.ref, at, actor.isBot);
       return person;
     });
   }
 
-  async observeName(entry: { stableId: string; ref: string; name: string }, at: string): Promise<Person> {
+  async observeName(entry: { stableId: string; ref: string; name: string; isBot?: boolean }, at: string): Promise<Person> {
     return this.commit(() => {
-      const person = this.upsert(entry.stableId, entry.name, entry.ref, at);
+      const person = this.upsert(entry.stableId, entry.name, entry.ref, at, entry.isBot === true);
       return person;
     });
   }
@@ -78,6 +84,7 @@ export class PersonDirectory {
       }
       for (const name of [...drop.names].reverse()) this.pushName(keep, name);
       keep.lastSeenAt = at > keep.lastSeenAt ? at : keep.lastSeenAt;
+      if (drop.isBot) keep.isBot = true;
       this.persons = this.persons.filter((person) => person !== drop);
       return keep;
     });
@@ -89,7 +96,7 @@ export class PersonDirectory {
     return this.persons.filter((person) => person.names.some((name) => name.toLowerCase().includes(needle)));
   }
 
-  private upsert(stableId: string, name: string, ref: string, at: string): Person {
+  private upsert(stableId: string, name: string, ref: string, at: string, isBot: boolean): Person {
     let person = this.persons.find((item) => item.identities.includes(stableId));
     if (!person) {
       person = {
@@ -98,20 +105,22 @@ export class PersonDirectory {
         names: name ? [name] : [],
         refs: ref ? [ref] : [],
         lastSeenAt: at,
+        isBot,
       };
       this.persons.push(person);
       return person;
     }
-    this.note(person, name, ref, at);
+    this.note(person, name, ref, at, isBot);
     return person;
   }
 
-  private note(person: Person, name: string, ref: string, at: string): void {
+  private note(person: Person, name: string, ref: string, at: string, isBot: boolean): void {
     if (name) this.pushName(person, name);
     if (ref) {
       person.refs = [ref, ...person.refs.filter((item) => item !== ref)];
     }
     if (at > person.lastSeenAt) person.lastSeenAt = at;
+    if (isBot) person.isBot = true;
   }
 
   private pushName(person: Person, name: string): void {
