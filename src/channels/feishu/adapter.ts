@@ -156,8 +156,9 @@ export class FeishuChannel implements ChannelAdapter {
       }
     }
     let raw = collected.filter((item) => inTime(item.create_time, q.start, q.end));
+    let rootId: string | undefined;
     if (q.withRoot) {
-      const rootId = raw.find((item) => item.root_id)?.root_id;
+      rootId = raw.find((item) => item.root_id)?.root_id;
       if (rootId && !raw.some((item) => item.message_id === rootId)) {
         const root = await this.fetchMessage(rootId);
         if (root && inTime(root.create_time, q.start, q.end)) raw = [root, ...raw];
@@ -176,7 +177,17 @@ export class FeishuChannel implements ChannelAdapter {
       records.push(normalized.record);
     }
     records.sort((a, b) => a.occurredAt.localeCompare(b.occurredAt) || a.messageId.localeCompare(b.messageId));
-    return records.slice(-q.limit);
+    const limited = records.slice(-q.limit);
+    // The limit keeps the newest messages. The topic root is the oldest, so
+    // that cut drops it; withRoot asked for it, so put it back.
+    if (rootId && !limited.some((item) => item.messageId === rootId)) {
+      const root = records.find((item) => item.messageId === rootId);
+      if (root) {
+        limited.push(root);
+        limited.sort((a, b) => a.occurredAt.localeCompare(b.occurredAt) || a.messageId.localeCompare(b.messageId));
+      }
+    }
+    return limited;
   }
 
   async download(ref: AttachmentRef): Promise<string> {

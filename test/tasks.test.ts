@@ -83,7 +83,11 @@ describe("tasks", () => {
       },
     ]);
     const history = await h.host.imHistory(parent.token, { container: "ou_owner", limit: 10 });
-    expect(JSON.stringify(history)).toContain("from platform");
+    const serialized = JSON.stringify(history);
+    expect(serialized).toContain("from platform");
+    expect(serialized).not.toContain("envelope");
+    expect(serialized).not.toMatch(/\[我 /);
+    expect(serialized).toContain('"body":"from platform"');
     const logPath = join(h.dir, "im", "ou_owner.jsonl");
     const stored = await readFile(logPath, "utf8").catch(() => "");
     expect(stored).not.toContain("from platform");
