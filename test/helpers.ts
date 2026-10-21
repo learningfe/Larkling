@@ -6,7 +6,7 @@ import { resolveConfig, type LarklingConfig } from "../src/config.js";
 import { MemoryChannel } from "../src/channels/memory.js";
 import { ManualClock } from "../src/core/clock.js";
 import { createHost, type Host } from "../src/core/host.js";
-import { Logger } from "../src/log.js";
+import { Logger, type LogLevel } from "../src/log.js";
 import type { Actor, ChannelEvent, MessageEvent, Scope } from "../src/protocol/types.js";
 import { ScriptedRuntime } from "../src/runtimes/scripted.js";
 
@@ -54,7 +54,29 @@ export interface Harness {
   host: Host;
 }
 
-export async function startHarness(patch?: (config: LarklingConfig) => void): Promise<Harness> {
+/** Records log events in memory and does not write them to the console. */
+export class CaptureLogger extends Logger {
+  readonly events: { level: LogLevel; event: string; fields: Record<string, unknown> }[] = [];
+
+  constructor() {
+    super(undefined, "debug");
+  }
+
+  override debug(event: string, fields: Record<string, unknown> = {}): void {
+    this.events.push({ level: "debug", event, fields });
+  }
+  override info(event: string, fields: Record<string, unknown> = {}): void {
+    this.events.push({ level: "info", event, fields });
+  }
+  override warn(event: string, fields: Record<string, unknown> = {}): void {
+    this.events.push({ level: "warn", event, fields });
+  }
+  override error(event: string, fields: Record<string, unknown> = {}): void {
+    this.events.push({ level: "error", event, fields });
+  }
+}
+
+export async function startHarness(patch?: (config: LarklingConfig) => void, logger?: Logger): Promise<Harness> {
   const dir = await tempDir();
   const config = await testConfig(dir, patch);
   const clock = new ManualClock(Date.parse("2026-03-15T02:00:00.000Z"));
@@ -65,7 +87,7 @@ export async function startHarness(patch?: (config: LarklingConfig) => void): Pr
     channel,
     runtimes: new Map([["codex", runtime]]),
     clock,
-    logger: new Logger(undefined, "error"),
+    logger: logger ?? new Logger(undefined, "error"),
     bot: { ref: "ou_bot", stableId: "memory:bot", name: "Larkling" },
     timers: false,
   });

@@ -28,7 +28,6 @@ import { conversationSessionId, scopeKey, taskSessionId } from "../protocol/type
 import { applyAudience, AudienceError, emptyAudience, readAudiencePatch, renderOutboundMentions, storedAudience } from "../protocol/audience.js";
 import { parseCheckReply, parseConversationReply, parseJudgeReply } from "../protocol/reply.js";
 import { buildSeed, transcriptTokens } from "../protocol/seed.js";
-import { renderEnvelope } from "../channels/envelope.js";
 import { backInstructions, compactInstructions, frontInstructions, heartbeatInstructions, relevanceInstructions, withFile } from "../tasks/prompts.js";
 import { listenApi, type TaskStartBody, type TaskUpdateBody } from "../tasks/api.js";
 import { heartbeatDue, slotsUsed } from "../tasks/scheduler.js";
@@ -36,10 +35,10 @@ import { newId, sha256 } from "../util/id.js";
 import { Logger } from "../log.js";
 import { purgeOldFiles } from "./cleanup.js";
 import { systemClock, type Clock } from "./clock.js";
-import { checkContext, conversationContext, isSelf, judgeContext, taskContext } from "./context.js";
+import { checkContext, conversationContext, isSelf, judgeContext, taskContext, type YouProfile } from "./context.js";
 import { batchTrigger, classifyArrival, takeBatch, withoutMessage } from "./delivery.js";
 import { ApiError, isSteerRejected, SteerRejected } from "./errors.js";
-import { Gate } from "./gate.js";
+import { Gate, logGateDecision } from "./gate.js";
 import { ImLog, type StoredMessage } from "./imlog.js";
 import { KeyedLock } from "./lock.js";
 import { PersonDirectory } from "./persons.js";
@@ -134,7 +133,7 @@ export class Host {
     this.log = options.logger ?? new Logger(join(options.config.stateDir, "log.jsonl"), "info");
     this.bot = options.bot ?? { ref: "bot", stableId: `${options.channel.channel}:bot`, name: "bot" };
     this.useTimers = options.timers ?? false;
-    this.gate = new Gate(options.config, options.channel.capabilities.readGroupMessages, this.clock, () => this.readParticipated());
+    this.gate = new Gate(options.config, options.channel.capabilities.readGroupMessages, this.clock, () => this.readParticipated(), this.log);
   }
 
   async start(): Promise<void> {
@@ -406,15 +405,24 @@ export class Host {
         draft.botChains[scopeKey(event.scope)] = 0;
       });
     }
-    if (fromBot || event.disposition === "store_only") return;
-    if (!trustAtLeast(trust, "allowed")) return;
+    if (fromBot || event.disposition === "store_only") {
+      this.logGateShortCircuit(event, "skip", fromBot ? "self" : "store_only");
+      return;
+    }
+    if (!trustAtLeast(trust, "allowed")) {
+      this.logGateShortCircuit(event, "skip", "trust");
+      return;
+    }
     const blocked = await this.stateStore.update((draft) => {
       const key = scopeKey(event.scope);
       if (!event.actor.isBot) return false;
       draft.botChains[key] = (draft.botChains[key] ?? 0) + 1;
       return draft.botChains[key] >= this.config.session.botChainLimit;
     });
-    if (blocked) return;
+    if (blocked) {
+      this.logGateShortCircuit(event, "skip", "bot_chain");
+      return;
+    }
     if (event.disposition === "unsupported") {
       if (event.mentionsSelf || event.scope.kind === "dm") {
         const sessionId = await this.ensureConversation(event.scope);
@@ -430,6 +438,7 @@ export class Host {
           sessionId,
         );
       }
+      this.logGateShortCircuit(event, "skip", "unsupported");
       return;
     }
     const gated = this.gate.accept(event);
@@ -1018,37 +1027,58 @@ export class Host {
   }
 
   private async runJudge(batch: { scope: Scope; messages: MessageEvent[] }): Promise<void> {
-    const recent = await this.safeHistory(batch.scope, this.config.im.gate.judgeContext, new Date(this.clock.now() - this.config.im.window.maxAgeMs).toISOString());
-    const root = batch.scope.kind === "topic" ? recent[0] : undefined;
-    const rendered = (records: ImRecord[]) =>
-      records
-        .map((record) =>
-          renderEnvelope({
-            name: record.actor.name || this.persons.displayName(record.actor.stableId, record.actor.ref),
-            isSelf: isSelf(record, this.bot.ref, this.bot.stableId),
-            occurredAt: record.occurredAt,
-            messageId: record.messageId,
-            body: record.text,
-            timeZone: this.config.timezone,
-            now: new Date(this.clock.now()),
-          }),
-        )
-        .join("\n\n");
-    const candidates = batch.messages
-      .map((message) => `${message.actor.name}: ${message.text}`)
-      .join("\n");
-    const text = await this.runOneShot(
-      "judge",
-      judgeContext({
-        persona: this.config.persona.text,
-        duty: this.config.persona.duty,
-        root: root ? rendered([root]) : undefined,
-        recent: rendered(recent),
-        candidates,
-      }),
-      batch.messages.map((message) => message.text),
-    );
-    if (parseJudgeReply(text) === "respond") await this.deliverMessages(batch.scope, batch.messages);
+    const history = await this.safeHistory(batch.scope, this.config.im.gate.judgeContext, new Date(this.clock.now() - this.config.im.window.maxAgeMs).toISOString());
+    const candidateIds = new Set(batch.messages.map((message) => message.messageId));
+    // Platform history already includes the messages being judged. recent is only
+    // what came before them; the oldest history row is the topic root when we have one.
+    const earlier = history.filter((record) => !candidateIds.has(record.messageId));
+    const root = batch.scope.kind === "topic" ? history[0] : undefined;
+    const candidates = batch.messages.map((message) => this.turnMessage(this.recordFromMessage(message)));
+    let text: string;
+    try {
+      text = await this.runOneShot(
+        "judge",
+        judgeContext({
+          you: this.youProfile(),
+          recent: earlier.map((record) => this.turnMessage(record)),
+          candidates,
+          root: root ? this.turnMessage(root) : undefined,
+        }),
+        batch.messages.map((message) => message.text),
+      );
+    } catch (error) {
+      logGateDecision(this.log, {
+        scope: batch.scope,
+        messages: batch.messages,
+        decision: "skip",
+        reason: "judge_failed",
+        mode: this.gate.modeFor(batch.scope),
+        source: "judge",
+        error: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
+    }
+    const judged = parseJudgeReply(text);
+    logGateDecision(this.log, {
+      scope: batch.scope,
+      messages: batch.messages,
+      decision: judged.verdict === "respond" ? "allow" : "skip",
+      reason: judged.reason,
+      mode: this.gate.modeFor(batch.scope),
+      source: "judge",
+    });
+    if (judged.verdict === "respond") await this.deliverMessages(batch.scope, batch.messages);
+  }
+
+  private logGateShortCircuit(event: MessageEvent, decision: "allow" | "skip", reason: string): void {
+    logGateDecision(this.log, {
+      scope: event.scope,
+      messages: [event],
+      decision,
+      reason,
+      mode: this.gate.modeFor(event.scope),
+      source: "short_circuit",
+    });
   }
 
   private async maybeCompact(sessionId: string): Promise<void> {
@@ -1083,7 +1113,13 @@ export class Host {
       const session = this.must(sessionId);
       await this.ensureRuntime(session);
       const turnId = newId();
-      const input: TurnInput = { turnId, context, messages: messages.map((text) => ({ text })) };
+      const input: TurnInput = {
+        turnId,
+        context,
+        // Judge candidates already live in the Turn input JSON. inContext stops Codex and pi
+        // from appending that raw text after the JSON.
+        messages: messages.map((text) => ({ text, ...(kind === "judge" ? { inContext: true } : {}) })),
+      };
       const now = this.iso();
       await this.stateStore.update((draft) => {
         const current = draft.sessions[sessionId];
@@ -1233,6 +1269,7 @@ export class Host {
             taskId: task?.taskId ?? session.taskId,
             version: task?.version,
             backTaskTools: this.usesAgentTools(session),
+            you: this.youProfile(),
           }),
           messages: [{ text: prompt }],
         },
@@ -1274,14 +1311,6 @@ export class Host {
     advanceMark(mark, [...history, ...records]);
     for (const record of [...history, ...records]) this.noteVisible(sessionId, record);
     const tasks = Object.values(this.stateStore.get().tasks).filter((task) => task.parentSessionId === sessionId);
-    const now = new Date(this.clock.now());
-    const shape = (record: ImRecord) =>
-      toTurnMessage(record, {
-        timeZone: this.config.timezone,
-        now,
-        isSelf: (ref, full) => (full ? isSelf(full, this.bot.ref, this.bot.stableId) : Boolean(this.bot.ref) && ref === this.bot.ref),
-        nameOf: (item) => (isSelf(item, this.bot.ref, this.bot.stableId) && this.bot.name) || item.actor.name || this.persons.displayName(item.actor.stableId, item.actor.ref),
-      });
     const structured: StructuredTurn | undefined = scope
       ? {
           turn: { kind: session.kind, cold, scope: { kind: scope.kind, id: scope.id } },
@@ -1289,10 +1318,10 @@ export class Host {
             ? {
                 mode: "full",
                 range: history.length ? { from: localIso(history[0].occurredAt, this.config.timezone), to: localIso(history[history.length - 1].occurredAt, this.config.timezone) } : null,
-                messages: history.map(shape),
+                messages: history.map((record) => this.turnMessage(record)),
               }
-            : { mode: "incremental", since: localIso(sinceMs, this.config.timezone), newCount: history.length, messages: history.map(shape) },
-          trigger: records.map(shape),
+            : { mode: "incremental", since: localIso(sinceMs, this.config.timezone), newCount: history.length, messages: history.map((record) => this.turnMessage(record)) },
+          trigger: records.map((record) => this.turnMessage(record)),
         }
       : undefined;
     if (structured) this.log.info("turn.input", { sessionId, cold, mode: structured.history.mode, historyCount: history.length, triggerCount: records.length });
@@ -1300,7 +1329,6 @@ export class Host {
       ? conversationContext({
           scope,
           now: this.iso(),
-          windowText: "",
           turnJson: structured ? JSON.stringify(structured, null, 2) : undefined,
           batch,
           tasks,
@@ -1309,6 +1337,7 @@ export class Host {
           sessionId,
           cli: this.cli,
           frontTaskTools: this.usesAgentTools(session),
+          you: this.youProfile(),
         })
       : "";
     const windowIds = scope ? records.map((record) => record.messageId) : [];
@@ -1571,18 +1600,10 @@ export class Host {
       records = [...merged.values()];
     }
     records.sort((a, b) => a.occurredAt.localeCompare(b.occurredAt));
-    return records.slice(-limit).map((record) => ({
-      ...record,
-      envelope: renderEnvelope({
-        name: record.actor.name || this.persons.displayName(record.actor.stableId, record.actor.ref),
-        isSelf: isSelf(record, this.bot.ref, this.bot.stableId),
-        occurredAt: record.occurredAt,
-        messageId: record.messageId,
-        body: record.text,
-        timeZone: this.config.timezone,
-        now: new Date(this.clock.now()),
-      }),
-    }));
+    return records.slice(-limit).map((record) => {
+      const message = this.turnMessage(record);
+      return record.attachments.length ? { ...message, attachments: record.attachments } : message;
+    });
   }
 
   async imFile(token: string, body: { messageId: string; key: string }): Promise<unknown> {
@@ -1780,14 +1801,43 @@ export class Host {
   }
 
   private instructionsFor(kind: SessionKind): string {
-    const persona = this.config.persona.text;
-    const duty = this.config.persona.duty;
-    const name = this.config.persona.name || this.bot.name || "assistant";
-    if (kind === "task") return withFile(backInstructions(persona, duty), this.config.agents.back.instructions);
+    if (kind === "task") return withFile(backInstructions(), this.config.agents.back.instructions);
     if (kind === "check") return heartbeatInstructions();
-    if (kind === "judge") return relevanceInstructions(persona, duty, name);
+    if (kind === "judge") return relevanceInstructions();
     if (kind === "compact") return compactInstructions();
-    return withFile(frontInstructions(persona, duty, name), this.config.agents.front.instructions);
+    return withFile(frontInstructions(), this.config.agents.front.instructions);
+  }
+
+  private youProfile(): YouProfile {
+    const duty = this.config.persona.duty.trim();
+    return {
+      name: this.config.persona.name || this.bot.name || "assistant",
+      persona: this.config.persona.text,
+      ...(duty ? { duty } : {}),
+    };
+  }
+
+  private turnMessage(record: ImRecord) {
+    return toTurnMessage(record, {
+      timeZone: this.config.timezone,
+      now: new Date(this.clock.now()),
+      isSelf: (ref, full) => (full ? isSelf(full, this.bot.ref, this.bot.stableId) : Boolean(this.bot.ref) && ref === this.bot.ref),
+      nameOf: (item) => (isSelf(item, this.bot.ref, this.bot.stableId) && this.bot.name) || item.actor.name || this.persons.displayName(item.actor.stableId, item.actor.ref),
+    });
+  }
+
+  private recordFromMessage(message: MessageEvent): ImRecord {
+    return {
+      messageId: message.messageId,
+      scope: message.scope,
+      actor: message.actor,
+      text: message.text,
+      attachments: message.attachments,
+      mentionsSelf: message.mentionsSelf,
+      mentions: message.mentions,
+      occurredAt: message.occurredAt,
+      replyTo: message.replyTo,
+    };
   }
 
   /** Env for agent tools (pi extensions / Codex dynamicTools). Conversation and task sessions. */

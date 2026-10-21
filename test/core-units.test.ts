@@ -7,7 +7,7 @@ import { resolveTrust } from "../src/core/trust.js";
 import { selectWindow, unreadCount } from "../src/core/window.js";
 import { renderEnvelope } from "../src/channels/envelope.js";
 import type { ImRecord, QueuedInput } from "../src/protocol/types.js";
-import { groupScope, message, OWNER_ID, tempDir, testConfig } from "./helpers.js";
+import { CaptureLogger, groupScope, message, OWNER_ID, tempDir, testConfig } from "./helpers.js";
 
 const actor = { channel: "memory", ref: "ou", stableId: "s", name: "Ada", isBot: false };
 
@@ -119,7 +119,8 @@ describe("gate", () => {
       draft.im.gate.debounceMs = 5_000;
     });
     const clock = new ManualClock(1_000);
-    const gate = new Gate(config, true, clock);
+    const logs = new CaptureLogger();
+    const gate = new Gate(config, true, clock, () => [], logs);
     const scope = groupScope();
     const first = message({ text: "a", scope, messageId: "1", mentionsSelf: false, occurredAt: "t" });
     expect(gate.accept(first)).toBe("buffered");
@@ -129,10 +130,29 @@ describe("gate", () => {
     expect(gate.due(clock.now())).toHaveLength(0);
     clock.advance(5_000);
     expect(gate.due(clock.now())[0].messages.map((item) => item.messageId)).toEqual(["1", "2"]);
+    expect(gateDecisions(logs)).toEqual([]);
     const other = message({ text: "c", scope, messageId: "3", mentionsSelf: false, mentionsOthers: true });
     expect(gate.accept(other)).toBe("dropped");
+    expect(gateDecisions(logs).at(-1)).toMatchObject({
+      sessionId: "memory:group:oc_group",
+      chatId: "oc_group",
+      messageIds: ["3"],
+      decision: "skip",
+      reason: "mentions_others",
+      mode: "relevant",
+      mentionsSelf: false,
+      senderId: OWNER_ID,
+      source: "short_circuit",
+    });
     const mention = message({ text: "d", scope, messageId: "4", mentionsSelf: true });
     expect(gate.accept(mention)).toEqual([mention]);
+    expect(gateDecisions(logs).at(-1)).toMatchObject({
+      messageIds: ["4"],
+      decision: "allow",
+      reason: "mention",
+      mentionsSelf: true,
+      source: "short_circuit",
+    });
   });
 
   it("judges a topic the bot has replied in unless that scope is configured", async () => {
@@ -140,37 +160,65 @@ describe("gate", () => {
       draft.im.respondTo.default = "mention";
     });
     const clock = new ManualClock(1_000);
-    const gate = new Gate(config, true, clock, () => ["omt_joined"]);
+    const logs = new CaptureLogger();
+    const gate = new Gate(config, true, clock, () => ["omt_joined"], logs);
     const joined = { channel: "memory", kind: "topic" as const, id: "omt_joined", parentId: "oc_family" };
     const other = { channel: "memory", kind: "topic" as const, id: "omt_other", parentId: "oc_family" };
     expect(gate.modeFor(joined)).toBe("relevant");
     expect(gate.modeFor(other)).toBe("mention");
     const quiet = message({ text: "later", scope: joined, messageId: "q1", mentionsSelf: false });
     expect(gate.accept(quiet)).toBe("buffered");
+    expect(gateDecisions(logs)).toEqual([]);
     config.im.respondTo.scopes.omt_joined = "mention";
     expect(gate.modeFor(joined)).toBe("mention");
     const skipped = message({ text: "nope", scope: joined, messageId: "q2", mentionsSelf: false });
     expect(gate.accept(skipped)).toBe("dropped");
+    expect(gateDecisions(logs).at(-1)).toMatchObject({
+      sessionId: "memory:topic:omt_joined",
+      chatId: "omt_joined",
+      parentId: "oc_family",
+      messageIds: ["q2"],
+      decision: "skip",
+      reason: "mention_required",
+      mode: "mention",
+      mentionsSelf: false,
+      source: "short_circuit",
+    });
   });
 
-  it("judges a bot in relevance mode instead of dropping it", async () => {
+  it("logs short-circuits that never call the judge", async () => {
     const config = await testConfig(await tempDir(), (draft) => {
       draft.im.respondTo.default = "relevant";
     });
     const clock = new ManualClock(1_000);
-    const gate = new Gate(config, true, clock);
+    const logs = new CaptureLogger();
+    const gate = new Gate(config, true, clock, () => [], logs);
     const scope = groupScope();
+    const dm = message({ text: "ping", messageId: "dm", mentionsSelf: true });
+    expect(gate.accept(dm)).toEqual([dm]);
+    expect(gateDecisions(logs).at(-1)).toMatchObject({ decision: "allow", reason: "dm", mode: "relevant", mentionsSelf: true });
     const bot = { channel: "memory", ref: "ou_b", stableId: "feishu:on_bot", name: "Other", isBot: true };
     const fromBot = message({ text: "bot", scope, messageId: "bot", mentionsSelf: false, actor: bot });
+    const beforeBot = gateDecisions(logs).length;
     expect(gate.accept(fromBot)).toBe("buffered");
+    expect(gateDecisions(logs)).toHaveLength(beforeBot);
+    expect(gateDecisions(logs).some((item) => item.reason === "bot_sender")).toBe(false);
     const mentioning = message({ text: "@sam", scope, messageId: "mb", mentionsSelf: false, mentionsOthers: true, actor: bot });
     expect(gate.accept(mentioning)).toBe("dropped");
-    const blind = new Gate(config, false, clock);
-    expect(blind.accept(message({ text: "quiet", scope, messageId: "quiet", mentionsSelf: false, actor: bot }))).toBe("dropped");
-    const mentioned = message({ text: "@bot", scope, messageId: "at", mentionsSelf: true, actor: bot });
+    expect(gateDecisions(logs).at(-1)).toMatchObject({ decision: "skip", reason: "mentions_others", senderId: "feishu:on_bot" });
+    const blind = new Gate(config, false, clock, () => [], logs);
+    const quiet = message({ text: "quiet", scope, messageId: "quiet", mentionsSelf: false });
+    expect(blind.accept(quiet)).toBe("dropped");
+    expect(gateDecisions(logs).at(-1)).toMatchObject({ messageIds: ["quiet"], decision: "skip", reason: "group_read_disabled" });
+    const mentioned = message({ text: "@bot", scope, messageId: "at", mentionsSelf: true });
     expect(blind.accept(mentioned)).toEqual([mentioned]);
+    expect(gateDecisions(logs).at(-1)).toMatchObject({ messageIds: ["at"], decision: "allow", reason: "mention" });
   });
 });
+
+function gateDecisions(logs: CaptureLogger): Record<string, unknown>[] {
+  return logs.events.filter((item) => item.event === "gate.decision").map((item) => item.fields);
+}
 
 describe("persons", () => {
   it("keeps the newest name first and merges only when asked", async () => {

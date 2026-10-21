@@ -247,7 +247,7 @@ describe("feishu adapter", () => {
     const http = new FakeHttp();
     http.handler = (input) => {
       if (input.path.includes("/messages/om_root")) {
-        return { status: 200, json: { code: 0, data: { items: [{ message_id: "om_root", msg_type: "text", content: { text: "root" }, chat_id: "oc_1" }] } } };
+        return { status: 200, json: { code: 0, data: { items: [{ message_id: "om_root", msg_type: "text", content: { text: "root" }, chat_id: "oc_1", create_time: "1700000000000" }] } } };
       }
       return {
         status: 200,
@@ -271,6 +271,8 @@ describe("feishu adapter", () => {
     expect(http.calls[0].query).toMatchObject({ container_id_type: "thread", container_id: "omt_1", sort_type: "ByCreateTimeDesc" });
     expect(http.calls[0].query?.start_time).toBeUndefined();
     expect(topic.some((item) => item.messageId === "om_root")).toBe(true);
+    const tight = await bot.history({ container: "omt_1", limit: 1, withRoot: true });
+    expect(tight.map((item) => item.messageId)).toEqual(["om_root", "om_2"]);
   });
 
   it("translates download errors 234043 and 234038", async () => {

@@ -7,7 +7,7 @@ import { MemoryChannel } from "../src/channels/memory.js";
 import { createHost } from "../src/core/host.js";
 import { describe, expect, it } from "vitest";
 import { conversationSessionId } from "../src/protocol/types.js";
-import { OWNER_ID, groupScope, message, ownerActor, post, pushAndSettle, startHarness, tempDir, testConfig, type Harness, waitFor } from "./helpers.js";
+import { CaptureLogger, OWNER_ID, groupScope, message, ownerActor, post, pushAndSettle, startHarness, tempDir, testConfig, type Harness, waitFor } from "./helpers.js";
 
 function conversation(h: Harness, id = "ou_owner") {
   return h.host.snapshot().sessions[conversationSessionId({ channel: "memory", kind: "dm", id })];
@@ -15,7 +15,9 @@ function conversation(h: Harness, id = "ou_owner") {
 
 describe("in-memory channel and scripted runtime", () => {
   it("answers an owner DM and stays silent on [[silent]]", async () => {
-    const h = await startHarness();
+    const h = await startHarness((config) => {
+      config.persona.duty = "help the owner";
+    });
     h.runtime.handler = async (turn) => {
       const text = turn.input.messages.map((item) => item.text).join("\n");
       turn.emit({ type: "turn.completed", text: text === "quiet" ? "[[silent]]" : `echo:${text}` });
@@ -24,7 +26,12 @@ describe("in-memory channel and scripted runtime", () => {
     expect(h.channel.sent.map((item) => (item.action.type === "text" ? item.action.text : ""))).toEqual(["echo:hello"]);
     expect(conversation(h).phase).toBe("idle");
     expect(h.runtime.opens[0].instructions).toContain("front instructions");
-    expect(h.runtime.opens[0].instructions).toContain("Your name is Larkling");
+    expect(h.runtime.opens[0].instructions).not.toContain("Your name is Larkling");
+    expect(h.runtime.opens[0].instructions).not.toContain("a personal assistant");
+    expect(h.runtime.starts[0].input.context).toContain('"name": "Larkling"');
+    expect(h.runtime.starts[0].input.context).toContain("a personal assistant");
+    expect(h.runtime.starts[0].input.context).toContain('"duty": "help the owner"');
+    expect(h.runtime.opens[0].instructions).not.toContain("help the owner");
     expect(h.runtime.opens[0].profile.network).toBe(false);
     expect(h.runtime.opens[0].profile.cwd).toMatch(/\/front$/);
     expect(h.runtime.starts[0].input.context).toContain("Token:");
@@ -248,51 +255,6 @@ describe("in-memory channel and scripted runtime", () => {
     expect(h.runtime.starts.length).toBe(before + 1);
   });
 
-  it("judges an unlisted bot in a relevant group and keeps a restricted group to its list", async () => {
-    const h = await startHarness((config) => {
-      config.im.respondTo.default = "relevant";
-      config.im.gate.debounceMs = 1_000;
-      config.trust.restricted = { oc_locked: ["ou_listed"] };
-      config.session.botChainLimit = 2;
-    });
-    h.runtime.handler = async (turn) => {
-      if (turn.spec.kind === "judge") {
-        turn.emit({ type: "turn.completed", text: "SKIP" });
-        return;
-      }
-      turn.emit({ type: "turn.completed", text: "front" });
-    };
-    const scope = groupScope("oc_desk");
-    const bot = { channel: "memory", ref: "ou_bot2", stableId: "feishu:ou_bot2", name: "Other", isBot: true };
-    h.channel.push(message({ text: "from bot", messageId: "b1", scope, actor: bot, mentionsSelf: false }));
-    await waitFor(() => h.host.snapshot().seenMessageIds.includes("b1"), "buffered bot");
-    await h.host.settle();
-    expect(h.runtime.opens.filter((item) => item.kind === "judge")).toHaveLength(0);
-    h.clock.advance(1_000);
-    await h.host.flushGate();
-    await h.host.settle();
-    expect(h.runtime.opens.filter((item) => item.kind === "judge")).toHaveLength(1);
-
-    const beforeChain = h.runtime.starts.length;
-    await pushAndSettle(h, message({ text: "chain", messageId: "b2", scope, actor: bot, mentionsSelf: true }));
-    expect(h.runtime.starts.length).toBe(beforeChain);
-
-    const locked = groupScope("oc_locked");
-    const stranger = { channel: "memory", ref: "ou_s", stableId: "feishu:on_stranger", name: "Sam", isBot: false };
-    const listed = { channel: "memory", ref: "ou_listed", stableId: "feishu:ou_listed", name: "Listed", isBot: false };
-    const topic = { channel: "memory" as const, kind: "topic" as const, id: "omt_locked", parentId: "oc_locked" };
-    await pushAndSettle(h, message({ text: "locked", messageId: "t1", scope: locked, actor: stranger, mentionsSelf: true }));
-    await pushAndSettle(h, message({ text: "bot locked", messageId: "t2", scope: topic, actor: bot, mentionsSelf: true }));
-    expect(h.runtime.starts.length).toBe(beforeChain);
-    await pushAndSettle(h, message({ text: "member", messageId: "t3", scope: locked, actor: listed, mentionsSelf: true }));
-    await pushAndSettle(h, message({ text: "owner", messageId: "t4", scope: topic, mentionsSelf: true }));
-    expect(h.runtime.starts.length).toBe(beforeChain + 2);
-
-    const dm = { channel: "memory" as const, kind: "dm" as const, id: "ou_s" };
-    await pushAndSettle(h, message({ text: "hi", messageId: "dm1", scope: dm, actor: stranger, mentionsSelf: false }));
-    expect(h.runtime.starts.length).toBe(beforeChain + 3);
-  });
-
   it("asks the owner on a card and continues after one approval", async () => {
     const h = await startHarness();
     h.runtime.handler = async (turn) => {
@@ -406,6 +368,202 @@ describe("in-memory channel and scripted runtime", () => {
     expect(h.runtime.opens.filter((item) => item.kind === "judge").length).toBe(before);
   });
 
+  it("logs why a relevant batch woke front or was skipped, including short-circuits", async () => {
+    const logs = new CaptureLogger();
+    const h = await startHarness((config) => {
+      config.im.respondTo.default = "relevant";
+      config.im.respondTo.scopes.oc_mention = "mention";
+      config.im.gate.debounceMs = 1_000;
+      config.trust.restricted = { oc_locked: [] };
+      config.session.botChainLimit = 2;
+    }, logs);
+    h.runtime.handler = async (turn) => {
+      if (turn.spec.kind !== "judge") {
+        turn.emit({ type: "turn.completed", text: "front" });
+        return;
+      }
+      const text = turn.input.messages.map((item) => item.text).join("\n");
+      if (text.startsWith("climb")) {
+        turn.emit({ type: "turn.completed", text: "RESPOND\n刚才在排登山，这条是在定下午出发。后面这句不要记。" });
+      } else if (text === "weather") {
+        turn.emit({ type: "turn.completed", text: "SKIP\n群在聊算术与工具，这条是小区快递，接不上。另一句。" });
+      } else if (text === "parcel") turn.emit({ type: "turn.completed", text: "RESPOND\n相关" });
+      else if (text === "boom") turn.emit({ type: "turn.failed", error: "light model down", retryable: false });
+      else turn.emit({ type: "turn.completed", text: "SKIP" });
+    };
+    const scope = groupScope("oc_desk");
+    const human = { channel: "memory", ref: "ou_s", stableId: "feishu:on_stranger", name: "Sam", isBot: false };
+    h.channel.histories.set("oc_desk", [
+      {
+        messageId: "old",
+        scope,
+        actor: human,
+        text: "earlier thread",
+        attachments: [],
+        mentionsSelf: false,
+        occurredAt: "2026-03-15T01:00:00.000Z",
+      },
+      {
+        messageId: "g1",
+        scope,
+        actor: human,
+        text: "climb",
+        attachments: [],
+        mentionsSelf: false,
+        occurredAt: "2026-03-15T02:00:00.000Z",
+      },
+    ]);
+    const other = { channel: "memory", ref: "ou_t", stableId: "feishu:on_other", name: "Tim", isBot: false };
+    h.channel.push(message({ text: "climb", messageId: "g1", scope, actor: human, mentionsSelf: false }));
+    h.channel.push(message({ text: "afternoon", messageId: "g1b", scope, actor: other, mentionsSelf: false }));
+    await waitFor(() => h.host.snapshot().seenMessageIds.includes("g1b"), "buffered batch");
+    await h.host.settle();
+    expect(gateDecisions(logs)).toEqual([]);
+    h.clock.advance(1_000);
+    await h.host.flushGate();
+    await h.host.settle();
+    expect(gateDecisions(logs).at(-1)).toMatchObject({
+      sessionId: "memory:group:oc_desk",
+      chatId: "oc_desk",
+      scopeKind: "group",
+      messageIds: ["g1", "g1b"],
+      decision: "allow",
+      reason: "刚才在排登山，这条是在定下午出发。",
+      mode: "relevant",
+      mentionsSelf: false,
+      senderIds: ["feishu:on_stranger", "feishu:on_other"],
+      source: "judge",
+    });
+    expect(gateDecisions(logs).at(-1)).not.toHaveProperty("senderId");
+    expect(h.channel.sent.some((item) => item.action.type === "text" && item.action.text === "front")).toBe(true);
+    const judgeOpen = h.runtime.opens.find((item) => item.kind === "judge");
+    expect(judgeOpen?.instructions).toContain("## Your job");
+    expect(judgeOpen?.instructions).not.toContain("a personal assistant");
+    expect(judgeOpen?.instructions).not.toMatch(/\p{Script=Han}/u);
+    const judgeStart = h.runtime.starts.find((item) => item.ref === `scripted:${judgeOpen?.sessionId}`);
+    const judgePayload = turnJson(judgeStart?.input.context ?? "");
+    expect(judgePayload.recent.map((item: { messageId: string }) => item.messageId)).toEqual(["old"]);
+    expect(judgePayload.candidates.map((item: { messageId: string; body: string }) => [item.messageId, item.body])).toEqual([
+      ["g1", "climb"],
+      ["g1b", "afternoon"],
+    ]);
+    expect(judgePayload).not.toHaveProperty("root");
+    expect(judgeStart?.input.context).toContain('"name": "Larkling"');
+    expect(judgeStart?.input.context).toContain("a personal assistant");
+    expect(judgeStart?.input.context).not.toContain("Persona:");
+    expect(judgeStart?.input.context).not.toContain("Duty:");
+    expect(judgeStart?.input.context).not.toMatch(/\[我 /);
+    expect(judgeStart?.input.context).not.toContain("#old]");
+    expect(judgeStart?.input.messages.every((item) => item.inContext)).toBe(true);
+
+    h.channel.push(message({ text: "weather", messageId: "g2", scope, actor: human, mentionsSelf: false }));
+    await waitFor(() => h.host.snapshot().seenMessageIds.includes("g2"), "buffered weather");
+    await h.host.settle();
+    h.clock.advance(1_000);
+    await h.host.flushGate();
+    await h.host.settle();
+    expect(gateDecisions(logs).at(-1)).toMatchObject({
+      messageIds: ["g2"],
+      decision: "skip",
+      reason: "群在聊算术与工具，这条是小区快递，接不上。",
+      mode: "relevant",
+      senderId: "feishu:on_stranger",
+      source: "judge",
+    });
+    expect(h.channel.sent.filter((item) => item.action.type === "text" && item.action.text === "front")).toHaveLength(1);
+
+    h.channel.push(message({ text: "later", messageId: "g3", scope, actor: human, mentionsSelf: false }));
+    await waitFor(() => h.host.snapshot().seenMessageIds.includes("g3"), "buffered later");
+    await h.host.settle();
+    h.clock.advance(1_000);
+    await h.host.flushGate();
+    await h.host.settle();
+    expect(gateDecisions(logs).at(-1)).toMatchObject({ messageIds: ["g3"], decision: "skip", reason: "reason_missing", source: "judge" });
+
+    h.channel.push(message({ text: "parcel", messageId: "g3b", scope, actor: human, mentionsSelf: false }));
+    await waitFor(() => h.host.snapshot().seenMessageIds.includes("g3b"), "buffered parcel");
+    await h.host.settle();
+    h.clock.advance(1_000);
+    await h.host.flushGate();
+    await h.host.settle();
+    expect(gateDecisions(logs).at(-1)).toMatchObject({ messageIds: ["g3b"], decision: "allow", reason: "reason_missing", source: "judge" });
+
+    const judgesBefore = h.runtime.opens.filter((item) => item.kind === "judge").length;
+    await pushAndSettle(h, message({ text: "@bot", messageId: "g4", scope, actor: human, mentionsSelf: true }));
+    expect(gateDecisions(logs).at(-1)).toMatchObject({
+      messageIds: ["g4"],
+      decision: "allow",
+      reason: "mention",
+      mentionsSelf: true,
+      source: "short_circuit",
+    });
+    expect(h.runtime.opens.filter((item) => item.kind === "judge")).toHaveLength(judgesBefore);
+
+    const mentionScope = groupScope("oc_mention");
+    await pushAndSettle(h, message({ text: "no at", messageId: "m1", scope: mentionScope, actor: human, mentionsSelf: false }));
+    expect(gateDecisions(logs).at(-1)).toMatchObject({
+      chatId: "oc_mention",
+      messageIds: ["m1"],
+      decision: "skip",
+      reason: "mention_required",
+      mode: "mention",
+      source: "short_circuit",
+    });
+    expect(h.runtime.opens.filter((item) => item.kind === "judge")).toHaveLength(judgesBefore);
+
+    const locked = groupScope("oc_locked");
+    await pushAndSettle(h, message({ text: "locked", messageId: "t1", scope: locked, actor: human, mentionsSelf: true }));
+    expect(gateDecisions(logs).at(-1)).toMatchObject({ chatId: "oc_locked", messageIds: ["t1"], decision: "skip", reason: "trust", source: "short_circuit" });
+
+    const allowedBot = { channel: "memory", ref: "ou_bot2", stableId: "feishu:ou_bot2", name: "Other", isBot: true };
+    const decisionsBeforeBot = gateDecisions(logs).length;
+    await pushAndSettle(h, message({ text: "from bot", messageId: "b1", scope, actor: allowedBot, mentionsSelf: false }));
+    expect(h.host.snapshot().seenMessageIds).toContain("b1");
+    expect(gateDecisions(logs)).toHaveLength(decisionsBeforeBot);
+    h.clock.advance(1_000);
+    await h.host.flushGate();
+    await h.host.settle();
+    expect(gateDecisions(logs).at(-1)).toMatchObject({ messageIds: ["b1"], decision: "skip", source: "judge" });
+    expect(gateDecisions(logs).some((item) => item.reason === "bot_sender")).toBe(false);
+
+    await pushAndSettle(h, message({ text: "chain", messageId: "b2", scope, actor: allowedBot, mentionsSelf: true }));
+    expect(gateDecisions(logs).at(-1)).toMatchObject({ messageIds: ["b2"], decision: "skip", reason: "bot_chain" });
+
+    await pushAndSettle(
+      h,
+      message({
+        text: "echo",
+        messageId: "self",
+        scope,
+        actor: { channel: "memory", ref: "ou_bot", stableId: "memory:bot", name: "Larkling", isBot: true },
+        mentionsSelf: false,
+      }),
+    );
+    expect(gateDecisions(logs).at(-1)).toMatchObject({ messageIds: ["self"], decision: "skip", reason: "self" });
+
+    await pushAndSettle(h, message({ text: "[表情包]", messageId: "sticker", scope, actor: human, mentionsSelf: false, disposition: "store_only" }));
+    expect(gateDecisions(logs).at(-1)).toMatchObject({ messageIds: ["sticker"], decision: "skip", reason: "store_only" });
+
+    await pushAndSettle(h, message({ text: "[不支持的消息类型：unknown]", messageId: "bad", scope, actor: human, mentionsSelf: false, disposition: "unsupported" }));
+    expect(gateDecisions(logs).at(-1)).toMatchObject({ messageIds: ["bad"], decision: "skip", reason: "unsupported" });
+
+    h.channel.push(message({ text: "boom", messageId: "g5", scope, actor: human, mentionsSelf: false }));
+    await waitFor(() => h.host.snapshot().seenMessageIds.includes("g5"), "buffered boom");
+    await h.host.settle();
+    h.clock.advance(1_000);
+    await h.host.flushGate();
+    await h.host.settle();
+    expect(gateDecisions(logs).at(-1)).toMatchObject({
+      messageIds: ["g5"],
+      decision: "skip",
+      reason: "judge_failed",
+      source: "judge",
+      error: "light model down",
+    });
+    expect(logs.events.some((item) => item.event === "judge.failed")).toBe(true);
+    expect(h.channel.sent.filter((item) => item.action.type === "text" && item.action.text === "front")).toHaveLength(3);
+  });
+
   it("passes fast through the front, back, and light profiles", async () => {
     const h = await startHarness((config) => {
       config.agents.front.fast = true;
@@ -431,11 +589,18 @@ describe("in-memory channel and scripted runtime", () => {
     const started = await post(h.host.apiUrl, parent.token, "/v1/task/start", { body: "work", followUpEnabled: false });
     expect(started.status).toBe(200);
     await h.host.settle();
-    expect(h.runtime.opens.find((item) => item.kind === "task")?.profile).toMatchObject({
+    const taskOpen = h.runtime.opens.find((item) => item.kind === "task");
+    expect(taskOpen?.profile).toMatchObject({
       model: "back-model",
       fast: true,
       network: true,
     });
+    expect(taskOpen?.instructions).toContain("back instructions");
+    expect(taskOpen?.instructions).not.toContain("Your name is");
+    expect(taskOpen?.instructions).not.toContain("a personal assistant");
+    const taskStart = h.runtime.starts.find((item) => item.ref === `scripted:${taskOpen?.sessionId}`);
+    expect(taskStart?.input.context).toContain('"name": "Larkling"');
+    expect(taskStart?.input.context).toContain("a personal assistant");
     const scope = { channel: "memory", kind: "topic" as const, id: "omt_fast", parentId: "oc_family" };
     const human = { channel: "memory", ref: "ou_s", stableId: "feishu:on_stranger", name: "Sam", isBot: false };
     await pushAndSettle(h, message({ text: "@bot", messageId: "f2", scope, actor: human, mentionsSelf: true }));
@@ -496,6 +661,10 @@ describe("in-memory channel and scripted runtime", () => {
   });
 
 });
+
+function gateDecisions(logs: CaptureLogger): Record<string, unknown>[] {
+  return logs.events.filter((item) => item.event === "gate.decision").map((item) => item.fields);
+}
 
 function turnJson(context: string) {
   const at = context.indexOf("Turn input:\n");
