@@ -40,7 +40,7 @@ export function formatMessageTime(occurredAt: string, timeZone: string, now = ne
   return `${month}-${day} ${hour}:${minute}`;
 }
 
-/** One header line plus the body, shared by turn context and `larkling im history`. */
+/** One header line plus the body, for human-facing history display. Not model input. */
 export function renderEnvelope(options: {
   name: string;
   isSelf: boolean;

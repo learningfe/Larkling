@@ -288,12 +288,13 @@ describe("codex app-server adapter", () => {
   it("does not repeat a message whose text is already in the context window", () => {
     const items = toCodexInput({
       turnId: "t",
-      context: "Recent messages:\n[Chris 10-15 21:56 #om_1]\n别查了",
+      context: 'Turn input:\n{"history":[{"messageId":"om_1","body":"别查了"}]}',
       messages: [{ text: "别查了", messageId: "om_1", inContext: true }, { text: "task event text" }],
     }) as { text?: string }[];
     const text = items.map((item) => item.text ?? "").join("\n");
     expect(text.match(/别查了/g)).toHaveLength(1);
-    expect(text).toContain("#om_1");
+    expect(text).toContain("om_1");
+    expect(text).not.toContain("#om_1");
     expect(text).toContain("task event text");
   });
 
@@ -444,7 +445,7 @@ describe("Codex dynamicTools", () => {
     // Provide scripted replies via transport's test API if any — skip if MemoryCodexTransport is duplex queue
     // Minimal: just check dynamicToolsForKind export
     const { dynamicToolsForKind, FRONT_DYNAMIC_TOOLS, BACK_DYNAMIC_TOOLS } = await import("../src/runtimes/codex/dynamic-tools.js");
-    expect(dynamicToolsForKind("conversation")?.map((t) => t.name)).toEqual(["task_start", "task_cancel"]);
+    expect(dynamicToolsForKind("conversation")?.map((t) => t.name)).toEqual(["task_start", "task_update", "task_get", "task_cancel"]);
     expect(dynamicToolsForKind("task")?.length).toBe(BACK_DYNAMIC_TOOLS.length);
     expect(FRONT_DYNAMIC_TOOLS[0].type).toBe("function");
     runtime.close();

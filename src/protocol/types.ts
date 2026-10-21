@@ -9,7 +9,7 @@
  * - Person.refs: platform address ids, so owner DMs can be sent from a stableId.
  */
 
-export type Trust = "owner" | "trusted" | "allowed" | "denied";
+export type Trust = "owner" | "allowed" | "denied";
 
 export interface Scope {
   channel: string;
@@ -36,6 +36,11 @@ export interface Person {
   lastSeenAt: string;
   /** Platform refs (Feishu open_id), most recent first. Not used as identity. */
   refs: string[];
+  /**
+   * True when this record was seen as a bot. Omitted on older files; readers treat that as false.
+   * A later human sighting does not clear it.
+   */
+  isBot?: boolean;
 }
 
 export type AttachmentKind = "image" | "file" | "audio" | "video";
@@ -50,6 +55,8 @@ export interface AttachmentRef {
 export interface MentionRef {
   ref: string;
   name: string;
+  /** From Feishu `mentioned_type: bot`. Omitted means a person. */
+  isBot?: boolean;
 }
 
 export type MessageDisposition = "normal" | "store_only" | "unsupported";
@@ -91,7 +98,7 @@ export type ChannelEvent =
       actor: Actor;
       decision: "approve" | "deny";
     }
-  | { type: "names"; entries: { stableId: string; ref: string; name: string }[] }
+  | { type: "names"; entries: { stableId: string; ref: string; name: string; isBot?: boolean }[] }
   /** Group info changed (Feishu `im.chat.updated_v1`). */
   | { type: "chat_updated"; chatId: string; name?: string };
 
@@ -278,6 +285,11 @@ export interface ChannelAdapter {
   chatInfo?(chatId: string): Promise<{ name?: string } | undefined>;
   /** Every member of a group for the directory cache. Optional per channel. */
   chatMembers?(chatId: string): Promise<{ openId: string; name: string }[]>;
+  /**
+   * Local display name for an open_id, including bots.
+   * The host attaches the person directory; the channel does not import it.
+   */
+  setPersonNameLookup?(lookup: (openId: string) => string | undefined): void;
 }
 
 export interface Profile {
@@ -286,12 +298,35 @@ export interface Profile {
   ref?: string;
 }
 
+/** A Feishu person the model has placed in a task audience. `openId` is `ou_…`. */
+export interface PersonRef {
+  openId: string;
+  name: string;
+}
+
+/**
+ * Who a matter's group/topic replies @, in order.
+ * Own is the original asker, Drive pushes the matter, Track is notified.
+ * Not cancel rights, approval, memory ownership, or trust.
+ */
+export interface TaskAudience {
+  own: PersonRef[];
+  drive: PersonRef[];
+  track: PersonRef[];
+}
+
 export interface TaskRecord {
   taskId: string;
   parentSessionId: string;
   source: { messageId: string; personId: string; turnId: string };
   /** Goal / current progress / next step / recent notes. Maintained by the front agent. */
   body: string;
+  /**
+   * Present once a task is created or its audience is written.
+   * Records from before audience existed omit it; readers treat that as empty.
+   * The harness does not fill this from the asker, history, or a ticket owner.
+   */
+  audience?: TaskAudience;
   followUpEnabled: boolean;
   version: number;
   status: "queued" | "running" | "ended" | "cancelling" | "cancelled";

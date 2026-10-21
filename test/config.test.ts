@@ -63,26 +63,25 @@ describe("config", () => {
     expect(loaded.agents.back.extra).toEqual({ custom: 1 });
   });
 
-  it("locks groups with trust.restricted and rejects the old whitelist", async () => {
+  it("reads a per-group allowlist and rejects the old trust keys", async () => {
     const loaded = await resolveConfig(
       {
         owner: "feishu:on_owner",
         channel: { memory: {} },
         agents,
-        trust: { restricted: ["oc_locked"], trusted: ["feishu:on_t"] },
+        trust: { restricted: { oc_locked: ["feishu:ou_a", "ou_b"] } },
       },
       {},
     );
-    expect(loaded.trust).toEqual({ trusted: ["feishu:on_t"], allowed: [], restricted: ["oc_locked"] });
+    expect(loaded.trust).toEqual({ restricted: { oc_locked: ["feishu:ou_a", "ou_b"] } });
     const defaults = await resolveConfig({ owner: "feishu:on_owner", channel: { memory: {} }, agents }, {});
-    expect(defaults.trust).toEqual({ trusted: [], allowed: [], restricted: [] });
+    expect(defaults.trust).toEqual({ restricted: {} });
     expect(defaults.session.botChainLimit).toBe(10);
-    await expect(
-      resolveConfig(
-        { owner: "feishu:on_owner", channel: { memory: {} }, agents, trust: { groups: ["oc_old"] } },
-        {},
-      ),
-    ).rejects.toThrow(/trust\.groups/);
+    const base = { owner: "feishu:on_owner", channel: { memory: {} }, agents };
+    await expect(resolveConfig({ ...base, trust: { groups: ["oc_old"] } }, {})).rejects.toThrow(/trust\.groups/);
+    await expect(resolveConfig({ ...base, trust: { trusted: [], allowed: [] } }, {})).rejects.toThrow(/trust\.trusted and trust\.allowed were removed/);
+    await expect(resolveConfig({ ...base, trust: { allowed: ["feishu:ou_a"] } }, {})).rejects.toThrow(/trust\.trusted and trust\.allowed were removed/);
+    await expect(resolveConfig({ ...base, trust: { restricted: ["oc_locked"] } }, {})).rejects.toThrow(/per-group allowlist/);
   });
 
   it("leaves dsh unimplemented", () => {

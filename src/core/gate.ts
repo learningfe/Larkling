@@ -1,6 +1,46 @@
 import type { LarklingConfig } from "../config.js";
+import type { Logger } from "../log.js";
+import { conversationSessionId, type MessageEvent, type Scope } from "../protocol/types.js";
 import type { Clock } from "./clock.js";
-import type { MessageEvent, Scope, Trust } from "../protocol/types.js";
+
+export type GateDecision = "allow" | "skip";
+export type GateDecisionSource = "judge" | "short_circuit";
+
+/**
+ * One `gate.decision` line per allow or skip.
+ * `reason` is a stable code when the model was not called.
+ * When the judge ran, it is the one sentence the model gave, or `reason_missing`.
+ */
+export function logGateDecision(
+  log: Logger,
+  input: {
+    scope: Scope;
+    messages: MessageEvent[];
+    decision: GateDecision;
+    reason: string;
+    mode: "mention" | "relevant";
+    source: GateDecisionSource;
+    error?: string;
+  },
+): void {
+  const senderIds = input.messages.map((message) => message.actor.stableId);
+  const uniqueSenders = [...new Set(senderIds)];
+  log.info("gate.decision", {
+    sessionId: conversationSessionId(input.scope),
+    chatId: input.scope.id,
+    scopeKind: input.scope.kind,
+    ...(input.scope.parentId ? { parentId: input.scope.parentId } : {}),
+    messageIds: input.messages.map((message) => message.messageId),
+    decision: input.decision,
+    reason: input.reason,
+    mode: input.mode,
+    mentionsSelf: input.messages.some((message) => message.mentionsSelf),
+    ...(uniqueSenders.length === 1 ? { senderId: uniqueSenders[0] } : {}),
+    senderIds,
+    source: input.source,
+    ...(input.error !== undefined ? { error: input.error } : {}),
+  });
+}
 
 export interface PendingBatch {
   key: string;
@@ -14,6 +54,7 @@ export interface PendingBatch {
  * or debounced and judged when the scope is relevant. A topic the bot has
  * already replied in is relevant unless config names that scope explicitly.
  * Debounce is trailing: the deadline moves to now + debounce on every arrival.
+ * Each allow and skip is logged as `gate.decision`. Buffering is not a decision.
  */
 export class Gate {
   private pending = new Map<string, PendingBatch>();
@@ -23,6 +64,7 @@ export class Gate {
     private readonly readGroupMessages: boolean,
     private readonly clock: Clock,
     private readonly participated: () => readonly string[] = () => [],
+    private readonly log?: Logger,
   ) {}
 
   modeFor(scope: Scope): "mention" | "relevant" {
@@ -36,12 +78,23 @@ export class Gate {
    * Messages returned here are delivered now. `null` means the event was
    * buffered or dropped. Store-only and unsupported messages never reach the gate.
    */
-  accept(event: MessageEvent, trust: Trust): MessageEvent[] | "buffered" | "dropped" {
-    if (event.scope.kind === "dm" || event.mentionsSelf) return [event];
-    if (!this.readGroupMessages) return "dropped";
-    if (this.modeFor(event.scope) !== "relevant") return "dropped";
-    if (event.actor.isBot && trust !== "owner" && trust !== "trusted") return "dropped";
-    if (event.mentionsOthers && !event.mentionsSelf) return "dropped";
+  accept(event: MessageEvent): MessageEvent[] | "buffered" | "dropped" {
+    if (event.scope.kind === "dm" || event.mentionsSelf) {
+      this.logShortCircuit(event, "allow", event.scope.kind === "dm" ? "dm" : "mention");
+      return [event];
+    }
+    if (!this.readGroupMessages) {
+      this.logShortCircuit(event, "skip", "group_read_disabled");
+      return "dropped";
+    }
+    if (this.modeFor(event.scope) !== "relevant") {
+      this.logShortCircuit(event, "skip", "mention_required");
+      return "dropped";
+    }
+    if (event.mentionsOthers && !event.mentionsSelf) {
+      this.logShortCircuit(event, "skip", "mentions_others");
+      return "dropped";
+    }
     const key = `${event.scope.channel}:${event.scope.kind}:${event.scope.id}`;
     const existing = this.pending.get(key);
     const deadline = this.clock.now() + this.config.im.gate.debounceMs;
@@ -79,5 +132,17 @@ export class Gate {
     let count = 0;
     for (const batch of this.pending.values()) count += batch.messages.length;
     return count;
+  }
+
+  private logShortCircuit(event: MessageEvent, decision: GateDecision, reason: string): void {
+    if (!this.log) return;
+    logGateDecision(this.log, {
+      scope: event.scope,
+      messages: [event],
+      decision,
+      reason,
+      mode: this.modeFor(event.scope),
+      source: "short_circuit",
+    });
   }
 }

@@ -1,4 +1,4 @@
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -8,8 +8,12 @@ import { feishuUuid } from "../src/channels/feishu/card.js";
 import { normalizeFeishuMessage, type FeishuRawMessage, type NormalizeContext } from "../src/channels/feishu/content.js";
 import type { FeishuHttp, FeishuResponse } from "../src/channels/feishu/http.js";
 import { ManualClock } from "../src/core/clock.js";
+import { createHost } from "../src/core/host.js";
 import { RateLimiter } from "../src/core/ratelimit.js";
+import { Logger } from "../src/log.js";
 import type { ChannelEvent } from "../src/protocol/types.js";
+import { ScriptedRuntime } from "../src/runtimes/scripted.js";
+import { post, tempDir, testConfig } from "./helpers.js";
 
 class FakeHttp implements FeishuHttp {
   readonly calls: { method: string; path: string; query?: Record<string, string | undefined>; json?: unknown }[] = [];
@@ -56,7 +60,7 @@ describe("feishu message normalization", () => {
     expect(text.text).toBe('hi <at user_id="ou_bot">Bot</at> <at user_id="all"></at>');
     expect(text.mentionsSelf).toBe(true);
     expect(text.mentionsOthers).toBe(true);
-    expect(text.names).toEqual([{ stableId: "feishu:ou_bot", ref: "ou_bot", name: "Bot" }]);
+    expect(text.names).toEqual([{ stableId: "feishu:ou_bot", ref: "ou_bot", name: "Bot", isBot: false }]);
 
     const post = await normalize(
       raw({
@@ -243,7 +247,7 @@ describe("feishu adapter", () => {
     const http = new FakeHttp();
     http.handler = (input) => {
       if (input.path.includes("/messages/om_root")) {
-        return { status: 200, json: { code: 0, data: { items: [{ message_id: "om_root", msg_type: "text", content: { text: "root" }, chat_id: "oc_1" }] } } };
+        return { status: 200, json: { code: 0, data: { items: [{ message_id: "om_root", msg_type: "text", content: { text: "root" }, chat_id: "oc_1", create_time: "1700000000000" }] } } };
       }
       return {
         status: 200,
@@ -267,6 +271,8 @@ describe("feishu adapter", () => {
     expect(http.calls[0].query).toMatchObject({ container_id_type: "thread", container_id: "omt_1", sort_type: "ByCreateTimeDesc" });
     expect(http.calls[0].query?.start_time).toBeUndefined();
     expect(topic.some((item) => item.messageId === "om_root")).toBe(true);
+    const tight = await bot.history({ container: "omt_1", limit: 1, withRoot: true });
+    expect(tight.map((item) => item.messageId)).toEqual(["om_root", "om_2"]);
   });
 
   it("translates download errors 234043 and 234038", async () => {
@@ -495,6 +501,110 @@ describe("feishu adapter", () => {
     expect(warnings).toEqual([{ openId: "ou_ghost", detail: "no display name" }]);
   });
 
+  it("resolves a bot sender from the person directory without calling members", async () => {
+    const http = new FakeHttp();
+    const memberCalls: string[] = [];
+    http.handler = (input) => {
+      if (input.path.includes("/members")) {
+        memberCalls.push(input.path);
+        return { status: 200, json: { code: 0, data: { items: [{ member_id: "ou_known", name: "陈睿" }] } } };
+      }
+      return { status: 200, json: { code: 0, data: {} } };
+    };
+    const dir = await mkdtemp(join(tmpdir(), "larkling-feishu-"));
+    const bot = new FeishuChannel({
+      http,
+      botOpenId: "ou_bot",
+      botName: "小灵",
+      readGroupMessages: true,
+      stateDir: dir,
+      ratePerSecond: 1000,
+      clock: new ManualClock(0),
+      personName: (openId) => (openId === "ou_astra" ? "毛明辉 Astra" : undefined),
+    });
+    const events = await collect(bot, () => bot.ingest(receive("ou_astra", "om_astra", "app")));
+    const message = events.find((event) => event.type === "message");
+    expect(message && message.type === "message" ? message.actor.name : "").toBe("毛明辉 Astra");
+    expect(memberCalls).toEqual([]);
+  });
+
+  it("resolves a bot sender after a members miss once the directory has the name", async () => {
+    const http = new FakeHttp();
+    const memberCalls: string[] = [];
+    http.handler = (input) => {
+      if (input.path.includes("/members")) {
+        memberCalls.push(input.path);
+        return { status: 200, json: { code: 0, data: { items: [] } } };
+      }
+      return { status: 200, json: { code: 0, data: {} } };
+    };
+    const names = new Map<string, string>();
+    const warnings: Record<string, unknown>[] = [];
+    const dir = await mkdtemp(join(tmpdir(), "larkling-feishu-"));
+    const bot = new FeishuChannel({
+      http,
+      botOpenId: "ou_bot",
+      readGroupMessages: true,
+      stateDir: dir,
+      ratePerSecond: 1000,
+      clock: new ManualClock(0),
+      personName: (openId) => names.get(openId),
+      log: { warn: (_event, fields) => warnings.push(fields ?? {}) },
+    });
+    const events = await collect(bot, async () => {
+      await bot.ingest(receive("ou_astra", "om_astra_1", "app"));
+      names.set("ou_astra", "毛明辉 Astra");
+      await bot.ingest(receive("ou_astra", "om_astra_2", "app"));
+    });
+    const messages = events.filter((event) => event.type === "message");
+    expect(messages.map((event) => (event.type === "message" ? event.actor.name : ""))).toEqual(["", "毛明辉 Astra"]);
+    expect(memberCalls).toHaveLength(1);
+    expect(warnings).toEqual([{ openId: "ou_astra", detail: "no display name" }]);
+  });
+
+  it("resolves a bot sender after a miss once a later mention supplies the name", async () => {
+    const http = new FakeHttp();
+    const memberCalls: string[] = [];
+    http.handler = (input) => {
+      if (input.path.includes("/members")) {
+        memberCalls.push(input.path);
+        return { status: 200, json: { code: 0, data: { items: [{ member_id: "ou_chris", name: "Chris" }] } } };
+      }
+      return { status: 200, json: { code: 0, data: {} } };
+    };
+    const dir = await mkdtemp(join(tmpdir(), "larkling-feishu-"));
+    const bot = new FeishuChannel({
+      http,
+      botOpenId: "ou_bot",
+      readGroupMessages: true,
+      stateDir: dir,
+      ratePerSecond: 1000,
+      clock: new ManualClock(0),
+    });
+    const events = await collect(bot, async () => {
+      await bot.ingest(receive("ou_astra", "om_astra_1", "app"));
+      await bot.ingest({
+        header: { event_id: "om_mention", event_type: "im.message.receive_v1" },
+        event: {
+          sender: { sender_type: "user", sender_id: { open_id: "ou_chris" } },
+          message: {
+            message_id: "om_mention",
+            chat_id: "oc_1",
+            chat_type: "group",
+            message_type: "text",
+            content: JSON.stringify({ text: "@_user_1 hi" }),
+            mentions: [{ key: "@_user_1", id: "ou_astra", name: "毛明辉 Astra", mentioned_type: "bot" }],
+            create_time: "1710000000000",
+          },
+        },
+      });
+      await bot.ingest(receive("ou_astra", "om_astra_2", "app"));
+    });
+    const messages = events.filter((event) => event.type === "message");
+    expect(messages.map((event) => (event.type === "message" ? event.actor.name : ""))).toEqual(["", "Chris", "毛明辉 Astra"]);
+    expect(memberCalls).toEqual(["/open-apis/im/v1/chats/oc_1/members", "/open-apis/im/v1/chats/oc_1/members"]);
+  });
+
   it("pages chat history with the time window on every page, start_time floored to seconds", async () => {
     const http = new FakeHttp();
     let page = 0;
@@ -536,9 +646,10 @@ describe("feishu adapter", () => {
     expect(record.actor).toMatchObject({ ref: "ou_bot", stableId: "feishu:ou_bot", isBot: true });
   });
 
-  it("passes well-formed <at> tags through and downgrades malformed ones", () => {
+  it("keeps well-formed ou_ tags and downgrades @all and malformed ids", () => {
     expect(sanitizeAtTags('<at user_id="ou_abc123">张三</at> 好了')).toBe('<at user_id="ou_abc123">张三</at> 好了');
-    expect(sanitizeAtTags('<at user_id="all"></at> 注意')).toBe('<at user_id="all"></at> 注意');
+    expect(sanitizeAtTags('<at user_id="ou_abc123">张三</at> <at user_id="all"></at>')).toBe('<at user_id="ou_abc123">张三</at> @all');
+    expect(sanitizeAtTags('<at user_id="all"></at> 注意')).toBe("@all 注意");
     expect(sanitizeAtTags('<at user_id="bad id">李四</at>')).toBe("@李四");
   });
 
@@ -586,6 +697,58 @@ function receive(openId: string, messageId: string, senderType = "user", chatTyp
 }
 
 describe("feishu directory", () => {
+  it("gives a previously mentioned bot its directory name when that bot later sends", async () => {
+    const dir = await tempDir();
+    await writeFile(
+      join(dir, "directory.json"),
+      JSON.stringify({
+        persons: [{ openId: "ou_astra", name: "毛明辉 Astra", groups: ["oc_1"], updatedAt: "2026-03-15T00:00:00.000Z", isBot: true }],
+        groups: [],
+      }),
+    );
+    const http = new FakeHttp();
+    const memberCalls: string[] = [];
+    http.handler = (input) => {
+      if (input.path.includes("/members")) {
+        memberCalls.push(input.path);
+        return { status: 200, json: { code: 0, data: { items: [{ member_id: "ou_chris", name: "Chris" }] } } };
+      }
+      return { status: 200, json: { code: 0, data: {} } };
+    };
+    const clock = new ManualClock(Date.parse("2026-03-15T02:00:00.000Z"));
+    const channel = new FeishuChannel({
+      http,
+      botOpenId: "ou_bot",
+      readGroupMessages: true,
+      stateDir: dir,
+      ratePerSecond: 1000,
+      clock,
+    });
+    const runtime = new ScriptedRuntime("codex");
+    runtime.handler = async (turn) => turn.emit({ type: "turn.completed", text: "ok" });
+    const host = await createHost({
+      config: await testConfig(dir),
+      channel,
+      runtimes: new Map([["codex", runtime]]),
+      clock,
+      logger: new Logger(undefined, "error"),
+      bot: { ref: "ou_bot", stableId: "feishu:ou_bot", name: "Larkling" },
+      timers: false,
+    });
+    await host.start();
+    try {
+      await channel.ingest(receive("ou_astra", "om_astra", "app"));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await host.settle();
+      const stored = JSON.parse(await readFile(join(dir, "persons.json"), "utf8")) as { persons: { names: string[]; identities: string[] }[] };
+      const astra = stored.persons.find((person) => person.identities.includes("feishu:ou_astra"));
+      expect(astra?.names[0]).toBe("毛明辉 Astra");
+      expect(memberCalls).toEqual([]);
+    } finally {
+      await host.stop();
+    }
+  });
+
   it("turns im.chat.updated_v1 into a chat_updated event and pages members", async () => {
     const http = new FakeHttp();
     http.handler = (input) =>
@@ -604,5 +767,63 @@ describe("feishu directory", () => {
       channel.ingest({ header: { event_type: "im.chat.updated_v1" }, event: { chat_id: "oc_1", after_change: { name: "新群名" }, before_change: { name: "旧" } } }),
     );
     expect(events).toEqual([{ type: "chat_updated", chatId: "oc_1", name: "新群名" }]);
+  });
+
+  it("upserts inbound mentions, including another bot, into the person directory", async () => {
+    const dir = await tempDir();
+    const http = new FakeHttp();
+    const clock = new ManualClock(Date.parse("2026-03-15T02:00:00.000Z"));
+    const channel = new FeishuChannel({
+      http,
+      botOpenId: "ou_bot",
+      readGroupMessages: true,
+      stateDir: dir,
+      ratePerSecond: 1000,
+      clock,
+    });
+    const runtime = new ScriptedRuntime("codex");
+    runtime.handler = async (turn) => turn.emit({ type: "turn.completed", text: "ok" });
+    const host = await createHost({
+      config: await testConfig(dir),
+      channel,
+      runtimes: new Map([["codex", runtime]]),
+      clock,
+      logger: new Logger(undefined, "error"),
+      bot: { ref: "ou_bot", stableId: "feishu:ou_bot", name: "Larkling" },
+      timers: false,
+    });
+    await host.start();
+    try {
+      await channel.ingest({
+        header: { event_id: "e-mentions", event_type: "im.message.receive_v1" },
+        event: {
+          sender: { sender_type: "user", sender_id: { open_id: "ou_owner" } },
+          message: {
+            message_id: "om_mentions",
+            chat_id: "oc_1",
+            chat_type: "group",
+            message_type: "text",
+            content: JSON.stringify({ text: "@_user_1 @_user_2 @_user_3 hi" }),
+            mentions: [
+              { key: "@_user_1", id: "ou_sam", nickname: "Sammy", mentioned_type: "user" },
+              { key: "@_user_2", openId: "ou_other", name: "OtherBot", mentioned_type: "bot" },
+              { key: "@_user_3", id: { open_id: "ou_bot" }, name: "Larkling", mentioned_type: "bot" },
+            ],
+            create_time: "1710000000000",
+          },
+        },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await host.settle();
+      const sam = await post(host.apiUrl, host.ownerToken, "/v1/person/lookup", { openId: "ou_sam", scope: "all" });
+      expect(sam.status).toBe(200);
+      expect(sam.json.matches[0]).toMatchObject({ openId: "ou_sam", name: "Sammy", isBot: false });
+      const other = await post(host.apiUrl, host.ownerToken, "/v1/person/lookup", { openId: "ou_other", scope: "all" });
+      expect(other.json.matches[0]).toMatchObject({ openId: "ou_other", name: "OtherBot", isBot: true });
+      const self = await post(host.apiUrl, host.ownerToken, "/v1/person/lookup", { openId: "ou_bot", scope: "all" });
+      expect(self.json.matches).toEqual([]);
+    } finally {
+      await host.stop();
+    }
   });
 });

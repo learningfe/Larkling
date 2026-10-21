@@ -99,14 +99,13 @@ export const configFileSchema = z
     owner: z.string().min(1),
     trust: z
       .object({
-        trusted: z.array(z.string()).default([]),
-        allowed: z.array(z.string()).default([]),
         /**
-         * Chat ids locked to the personal allowlist (owner, trusted, allowed).
-         * Empty means every group is open. Topics inherit the parent chat.
-         * Listing an id closes that chat; this is not an open-group whitelist.
+         * Per-chat allowlist. A listed chat id admits only the owner and these
+         * ids (`feishu:ou_…` or bare `ou_…`). Other groups and topics are open
+         * to everyone, including bots. A topic inherits its parent group unless
+         * its own id is listed.
          */
-        restricted: z.array(z.string()).default([]),
+        restricted: z.record(z.string(), z.array(z.string())).default({}),
       })
       .strict()
       .default({}),
@@ -230,7 +229,7 @@ export interface LarklingConfig {
       }
     | { kind: "memory"; readGroupMessages: boolean };
   owner: string;
-  trust: { trusted: string[]; allowed: string[]; restricted: string[] };
+  trust: { restricted: Record<string, string[]> };
   im: {
     window: { group: number; topic: number; maxTokens: number; maxAgeMs: number };
     respondTo: { default: "mention" | "relevant"; scopes: Record<string, "mention" | "relevant"> };
@@ -262,14 +261,26 @@ export async function loadConfig(path: string, env: NodeJS.ProcessEnv = process.
 const removedTrustGroups =
   "trust.groups was removed. Groups are open unless listed in trust.restricted. Delete trust.groups; do not copy those chat ids into restricted (that inverts the old open-group whitelist).";
 
+const removedTrustLists =
+  'trust.trusted and trust.allowed were removed. DMs and open groups allow anyone who can reach the bot, human or bot. Delete those keys. To limit one group, set trust.restricted to { <chatId>: ["feishu:ou_…"] }.';
+
+const removedRestrictedList =
+  'trust.restricted is now a per-group allowlist, not a list of chat ids. Write { <chatId>: ["feishu:ou_…", "ou_…"] }. Omit it, or use {}, when every group is open.';
+
+function assertTrustShape(input: unknown): void {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return;
+  const trust = (input as { trust?: unknown }).trust;
+  if (!trust || typeof trust !== "object" || Array.isArray(trust)) return;
+  const record = trust as Record<string, unknown>;
+  if ("groups" in record) throw new Error(removedTrustGroups);
+  if ("trusted" in record || "allowed" in record) throw new Error(removedTrustLists);
+  if (Array.isArray(record.restricted)) throw new Error(removedRestrictedList);
+}
+
 function parseConfigFile(input: unknown): ConfigFile {
+  assertTrustShape(input);
   const result = configFileSchema.safeParse(input);
   if (result.success) return result.data;
-  for (const issue of result.error.issues) {
-    if (issue.code !== "unrecognized_keys" || issue.path[0] !== "trust" || !issue.keys.includes("groups")) continue;
-    // A generic unrecognized-key error would invite copying the old whitelist into restricted.
-    throw new Error(removedTrustGroups);
-  }
   throw result.error;
 }
 

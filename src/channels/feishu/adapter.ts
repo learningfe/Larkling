@@ -5,7 +5,7 @@ import { AsyncQueue } from "../../util/async-queue.js";
 import { RateLimiter } from "../../core/ratelimit.js";
 import { systemClock, type Clock } from "../../core/clock.js";
 import { approvalCard, feishuUuid } from "./card.js";
-import { millisToIso, normalizeFeishuMessage, type FeishuMention, type FeishuRawMessage } from "./content.js";
+import { mentionDisplayName, mentionOpenId, millisToIso, normalizeFeishuMessage, type FeishuMention, type FeishuRawMessage } from "./content.js";
 import { ffmpegToPcm, transcribeAudio, withTempPcm } from "./audio.js";
 import type { FeishuHttp, FeishuResponse } from "./http.js";
 
@@ -26,6 +26,11 @@ export interface FeishuChannelOptions {
   clock?: Clock;
   ffmpeg?: (input: string, output: string) => Promise<void>;
   log?: { warn(event: string, fields?: Record<string, unknown>): void };
+  /**
+   * Name from the person directory, including bots.
+   * The host attaches this after the directory opens. The channel does not import that store.
+   */
+  personName?: (openId: string) => string | undefined;
 }
 
 /**
@@ -44,12 +49,19 @@ export class FeishuChannel implements ChannelAdapter {
   private readonly clock: Clock;
   private readonly names = new Map<string, string>();
   private readonly nameMisses = new Set<string>();
+  private personName?: (openId: string) => string | undefined;
 
   constructor(private readonly options: FeishuChannelOptions) {
     this.capabilities = { readGroupMessages: options.readGroupMessages };
     this.clock = options.clock ?? systemClock;
     this.limiter = new RateLimiter(options.ratePerSecond ?? 20, this.clock);
     this.speech = new RateLimiter(options.speechPerSecond ?? 20, this.clock);
+    this.personName = options.personName;
+  }
+
+  /** Host attaches the person directory here. Includes bots. */
+  setPersonNameLookup(lookup: (openId: string) => string | undefined): void {
+    this.personName = lookup;
   }
 
   events(): AsyncIterable<ChannelEvent> {
@@ -156,8 +168,9 @@ export class FeishuChannel implements ChannelAdapter {
       }
     }
     let raw = collected.filter((item) => inTime(item.create_time, q.start, q.end));
+    let rootId: string | undefined;
     if (q.withRoot) {
-      const rootId = raw.find((item) => item.root_id)?.root_id;
+      rootId = raw.find((item) => item.root_id)?.root_id;
       if (rootId && !raw.some((item) => item.message_id === rootId)) {
         const root = await this.fetchMessage(rootId);
         if (root && inTime(root.create_time, q.start, q.end)) raw = [root, ...raw];
@@ -176,7 +189,17 @@ export class FeishuChannel implements ChannelAdapter {
       records.push(normalized.record);
     }
     records.sort((a, b) => a.occurredAt.localeCompare(b.occurredAt) || a.messageId.localeCompare(b.messageId));
-    return records.slice(-q.limit);
+    const limited = records.slice(-q.limit);
+    // The limit keeps the newest messages. The topic root is the oldest, so
+    // that cut drops it; withRoot asked for it, so put it back.
+    if (rootId && !limited.some((item) => item.messageId === rootId)) {
+      const root = records.find((item) => item.messageId === rootId);
+      if (root) {
+        limited.push(root);
+        limited.sort((a, b) => a.occurredAt.localeCompare(b.occurredAt) || a.messageId.localeCompare(b.messageId));
+      }
+    }
+    return limited;
   }
 
   async download(ref: AttachmentRef): Promise<string> {
@@ -347,15 +370,14 @@ export class FeishuChannel implements ChannelAdapter {
         return typeof name === "string" ? name : undefined;
       },
       userName: async (openId) => {
-        const mention = mentions.find((item) => {
-          const id = item.id;
-          return (typeof id === "string" ? id : id?.open_id) === openId;
-        });
+        const mention = mentions.find((item) => mentionOpenId(item) === openId);
         const dm = message.chat_type === "p2p";
-        return this.displayNameFor(openId, { mentionName: mention?.name, chatId: dm ? undefined : String(message.chat_id ?? ""), dm });
+        return this.displayNameFor(openId, { mentionName: mention ? mentionDisplayName(mention) : undefined, chatId: dm ? undefined : String(message.chat_id ?? ""), dm });
       },
     });
-    const senderName = mentions.find((item) => mentionOpen(item) === (message.sender?.sender_id?.open_id || message.sender?.id))?.name ?? "";
+    const senderMention = mentions.find((item) => mentionOpenId(item) === (message.sender?.sender_id?.open_id || message.sender?.id));
+    const senderName = senderMention ? mentionDisplayName(senderMention) : "";
+    for (const entry of result.names) this.rememberName(entry.ref, entry.name);
     const record: ImRecord = {
       messageId,
       scope: scopeFrom(message),
@@ -396,32 +418,45 @@ export class FeishuChannel implements ChannelAdapter {
   }
 
   /**
-   * Display name for an open_id. Mention text and the bot's own app name win.
-   * Otherwise a group or topic looks up `im/v1/chats/{chat_id}/members`.
-   * DMs are not looked up; a miss stays unnamed and is logged once.
+   * Display name for an open_id. Cache, this bot's app name, and mention text win.
+   * Then the person directory, including bots. A group or topic otherwise looks up
+   * `im/v1/chats/{chat_id}/members`, which does not list bots. That miss is remembered
+   * so the members call is not repeated; a later directory or mention name still wins.
+   * DMs do not call the members API.
    */
   private async displayNameFor(openId: string, hints: { mentionName?: string; chatId?: string; dm?: boolean }): Promise<string> {
     if (!openId || openId === "all") return "";
     const cached = this.names.get(openId);
     if (cached) return cached;
     if (this.options.botOpenId && openId === this.options.botOpenId && this.options.botName) {
-      this.names.set(openId, this.options.botName);
+      this.rememberName(openId, this.options.botName);
       return this.options.botName;
     }
     if (hints.mentionName) {
-      this.names.set(openId, hints.mentionName);
+      this.rememberName(openId, hints.mentionName);
       return hints.mentionName;
+    }
+    const known = this.personName?.(openId);
+    if (known) {
+      this.rememberName(openId, known);
+      return known;
     }
     if (hints.dm || !hints.chatId) return "";
     if (this.nameMisses.has(openId)) return "";
     const member = await this.lookupMember(hints.chatId, openId);
     if (member.name) {
-      this.names.set(openId, member.name);
+      this.rememberName(openId, member.name);
       return member.name;
     }
     this.nameMisses.add(openId);
     this.options.log?.warn("name.lookup_failed", { openId, detail: member.error || "no display name" });
     return "";
+  }
+
+  private rememberName(openId: string, name: string): void {
+    if (!openId || openId === "all" || !name) return;
+    this.names.set(openId, name);
+    this.nameMisses.delete(openId);
   }
 
   private async lookupMember(chatId: string, openId: string): Promise<{ name?: string; error?: string }> {
@@ -526,11 +561,6 @@ function actorFromIds(ids: Record<string, unknown>, senderType: string, name = "
   };
 }
 
-function mentionOpen(mention: FeishuMention): string | undefined {
-  if (typeof mention.id === "string") return mention.id;
-  return mention.id?.open_id;
-}
-
 function parseContent(message: FeishuRawMessage): Record<string, unknown> {
   const source = message.body?.content ?? message.content;
   if (typeof source === "string") {
@@ -585,13 +615,18 @@ function textOrUndefined(value: unknown): string | undefined {
 }
 
 /**
- * The model @s people with Feishu's own `<at user_id="ou_x">Name</at>`, which
- * text and post `md` render natively. Tags whose id is not well-formed are
- * downgraded to plain `@Name`; nobody is added.
+ * Outbound text and post `md` render `<at>` as a real mention.
+ * The host already keeps only a well-formed `ou_…` tag in group and topic
+ * replies, and turns every tag into plain text in a DM. This pass repeats that
+ * whitelist so a tag that reached this layer cannot mention the whole chat or
+ * an arbitrary id.
  */
 export function sanitizeAtTags(text: string): string {
-  return text.replace(/<at\s+user_id="([^"]*)"\s*>([^<]*)<\/at>/g, (whole, id: string, name: string) => {
-    if (id === "all" || /^ou_[A-Za-z0-9]+$/.test(id)) return `<at user_id="${id}">${id === "all" ? "" : name}</at>`;
+  return text.replace(/<\s*at\b[^<>]*>([\s\S]*?)<\s*\/\s*at\s*>/gi, (whole, inner: string) => {
+    const id = /\buser_id\s*=\s*["']([^"']*)["']/i.exec(whole)?.[1] ?? "";
+    const name = String(inner).replace(/<[^>]*>/g, "").trim();
+    if (/^ou_[A-Za-z0-9]+$/.test(id)) return `<at user_id="${id}">${name}</at>`;
+    if (id === "all") return "@all";
     return name ? `@${name}` : "";
   });
 }

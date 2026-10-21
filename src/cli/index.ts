@@ -12,6 +12,7 @@ import { createDshRuntime } from "../runtimes/dsh/index.js";
 import { PiRuntime } from "../runtimes/pi/adapter.js";
 import { StateStore } from "../core/state.js";
 import { Logger } from "../log.js";
+import { storedAudience } from "../protocol/audience.js";
 import type { RuntimeAdapter } from "../protocol/types.js";
 
 const args = process.argv.slice(2);
@@ -100,6 +101,7 @@ async function status(configPath?: string): Promise<void> {
     status: task.status,
     followUpEnabled: task.followUpEnabled,
     version: task.version,
+    audience: storedAudience(task.audience),
     pendingEvent: task.pendingEvent?.reason,
   }));
   const approvals = Object.values(snapshot.approvals).filter((approval) => approval.status === "pending").length;
@@ -212,12 +214,16 @@ async function configCommand(action: string | undefined, configPath?: string): P
 async function taskCommand(op: string | undefined): Promise<void> {
   const api = apiLocation();
   switch (op) {
-    case "start":
-      return print(await call(api, "/v1/task/start", { body: required("--body"), followUpEnabled: args.includes("--follow-up") }));
+    case "start": {
+      const payload: Record<string, unknown> = { body: required("--body"), followUpEnabled: args.includes("--follow-up") };
+      const audience = audienceFlag();
+      if (audience !== undefined) payload.audience = audience;
+      return print(await call(api, "/v1/task/start", payload));
+    }
     case "continue":
       return print(await call(api, "/v1/task/continue", { taskId: required("--task"), message: required("--message") }));
     case "update":
-      return print(await call(api, "/v1/task/update", { taskId: required("--task"), version: Number(required("--version")), body: required("--body"), followUpEnabled: args.includes("--follow-up") }));
+      return print(await call(api, "/v1/task/update", taskUpdatePayload()));
     case "get":
       return print(await call(api, "/v1/task/get", { taskId: required("--task") }));
     case "list":
@@ -335,6 +341,33 @@ function flag(name: string): string | undefined {
   const index = args.indexOf(name);
   if (index < 0) return undefined;
   return args[index + 1];
+}
+
+function audienceFlag(): unknown | undefined {
+  const raw = flag("--audience");
+  if (raw === undefined) return undefined;
+  try {
+    return JSON.parse(raw) as unknown;
+  } catch {
+    throw new Error("--audience must be JSON");
+  }
+}
+
+function taskUpdatePayload(): Record<string, unknown> {
+  const payload: Record<string, unknown> = { taskId: required("--task"), version: Number(required("--version")) };
+  const body = flag("--body");
+  if (body !== undefined) payload.body = body;
+  const audience = audienceFlag();
+  if (audience !== undefined) payload.audience = audience;
+  const follow = args.includes("--follow-up");
+  const noFollow = args.includes("--no-follow-up");
+  if (follow && noFollow) throw new Error("pass only one of --follow-up and --no-follow-up");
+  if (follow) payload.followUpEnabled = true;
+  if (noFollow) payload.followUpEnabled = false;
+  if (body === undefined && audience === undefined && !follow && !noFollow) {
+    throw new Error("task update needs --body, --audience, or --follow-up/--no-follow-up");
+  }
+  return payload;
 }
 
 function required(name: string): string {

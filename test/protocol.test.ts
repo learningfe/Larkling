@@ -23,10 +23,39 @@ describe("reply protocol", () => {
     expect(parseCheckReply("something else")).toBe("wake");
   });
 
-  it("ignores a judge reply unless the first line is RESPOND", () => {
-    expect(parseJudgeReply("RESPOND\nbecause")).toBe("respond");
-    expect(parseJudgeReply("IGNORE")).toBe("ignore");
-    expect(parseJudgeReply("maybe")).toBe("ignore");
+  it("takes one why-sentence from the judge and does not treat a bare verdict as the reason", () => {
+    expect(parseJudgeReply("RESPOND\n刚才在排登山的时间，这条补的是爬山当天的天气。")).toEqual({
+      verdict: "respond",
+      reason: "刚才在排登山的时间，这条补的是爬山当天的天气。",
+    });
+    expect(parseJudgeReply("SKIP\n群在聊算术与工具，这条是小区快递，接不上。另一句不要。")).toEqual({
+      verdict: "ignore",
+      reason: "群在聊算术与工具，这条是小区快递，接不上。",
+    });
+    expect(parseJudgeReply("RESPOND 上一条在问小灵周末有没有空，这条是在回那个问题。")).toEqual({
+      verdict: "respond",
+      reason: "上一条在问小灵周末有没有空，这条是在回那个问题。",
+    });
+    expect(parseJudgeReply("IGNORE\n前几条在对预算表，这条改聊周末电影，不是同一件事。")).toEqual({
+      verdict: "ignore",
+      reason: "前几条在对预算表，这条改聊周末电影，不是同一件事。",
+    });
+    expect(parseJudgeReply("RESPOND")).toEqual({ verdict: "respond", reason: "reason_missing" });
+    expect(parseJudgeReply("SKIP")).toEqual({ verdict: "ignore", reason: "reason_missing" });
+    expect(parseJudgeReply("RESPOND\n相关")).toEqual({ verdict: "respond", reason: "reason_missing" });
+    expect(parseJudgeReply("SKIP\n与话题无关")).toEqual({ verdict: "ignore", reason: "reason_missing" });
+    expect(parseJudgeReply("SKIP\noff-topic")).toEqual({ verdict: "ignore", reason: "reason_missing" });
+    expect(parseJudgeReply("RESPOND\nrelated")).toEqual({ verdict: "respond", reason: "reason_missing" });
+    expect(parseJudgeReply("RESPOND\n「相关」")).toEqual({ verdict: "respond", reason: "reason_missing" });
+    expect(parseJudgeReply("RESPOND\nOwner is still on the hike plan. Extra essay.")).toEqual({
+      verdict: "respond",
+      reason: "Owner is still on the hike plan.",
+    });
+    expect(parseJudgeReply("maybe")).toEqual({ verdict: "ignore", reason: "reason_missing" });
+    expect(parseJudgeReply("RESPOND\n群里刚在对快递柜，这条是去物业取包裹。\n再写一段。")).toEqual({
+      verdict: "respond",
+      reason: "群里刚在对快递柜，这条是去物业取包裹。",
+    });
   });
 
   it("keeps the full task result", () => {

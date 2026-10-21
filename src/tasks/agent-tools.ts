@@ -6,10 +6,17 @@
 
 export type AgentToolHttpResult = { status: number; text: string };
 
+/** Partial audience. Omitted roles are left unchanged by task/update. */
+export interface AudienceInput {
+  own?: { openId: string; name: string }[];
+  drive?: { openId: string; name: string }[];
+  track?: { openId: string; name: string }[];
+}
+
 export async function taskStartRequest(
   apiUrl: string,
   token: string,
-  body: { body: string; followUpEnabled?: boolean },
+  body: { body: string; followUpEnabled?: boolean; audience?: AudienceInput },
 ): Promise<AgentToolHttpResult> {
   return post(apiUrl, token, "/v1/task/start", body);
 }
@@ -21,7 +28,7 @@ export async function taskCancelRequest(apiUrl: string, token: string, taskId: s
 export async function taskUpdateRequest(
   apiUrl: string,
   token: string,
-  body: { taskId: string; version: number; body: string; followUpEnabled: boolean },
+  body: { taskId: string; version: number; body?: string; followUpEnabled?: boolean; audience?: AudienceInput },
 ): Promise<AgentToolHttpResult> {
   return post(apiUrl, token, "/v1/task/update", body);
 }
@@ -30,13 +37,14 @@ export async function taskUpdateRequest(
 export async function taskCompleteRequest(
   apiUrl: string,
   token: string,
-  body: { taskId: string; version: number; body: string; followUpEnabled?: boolean },
+  body: { taskId: string; version: number; body: string; followUpEnabled?: boolean; audience?: AudienceInput },
 ): Promise<AgentToolHttpResult> {
   return taskUpdateRequest(apiUrl, token, {
     taskId: body.taskId,
     version: body.version,
     body: body.body,
     followUpEnabled: body.followUpEnabled ?? false,
+    ...(body.audience !== undefined ? { audience: body.audience } : {}),
   });
 }
 
